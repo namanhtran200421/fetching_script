@@ -1,0 +1,18 @@
+{
+  "sqltools.connections": [
+    {
+      "name": "Local WordPress (MariaDB)",
+      "group": "Local",
+      "driver": "MariaDB",
+      "socketPath": "/tmp/mysql.sock",
+      "database": "membership_atlas_db",
+      "username": "namanhtran",
+      "password": "",
+      "previewLimit": 100,
+      "mysqlOptions": {
+        "authProtocol": "default",
+        "enableSsl": "Disabled"
+      }
+    }
+  ]
+}
