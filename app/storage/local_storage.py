@@ -14,7 +14,7 @@ class LocalStorage:
         self,
         run_id: str,
         source_name: str,
-        items: list
+        data
     ):
         source_dir = self.base_dir / run_id
 
@@ -35,14 +35,13 @@ class LocalStorage:
         ) as file:
 
             json.dump(
-                items,
+                data,
                 file,
                 ensure_ascii=False,
                 indent=2
             )
 
         return file_path
-
 
     def save_manifest(
         self,
