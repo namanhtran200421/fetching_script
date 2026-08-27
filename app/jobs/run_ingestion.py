@@ -27,10 +27,6 @@ def run():
         f"Starting ingestion run: {run_id}"
     )
 
-    # ---------------------------------
-    # Clients
-    # ---------------------------------
-
     wordpress_client = WordPressClient(
         base_url=WORDPRESS_BASE_URL,
         username=WORDPRESS_USERNAME,
@@ -44,9 +40,6 @@ def run():
         api_token=MEC_API_TOKEN
     )
 
-    # ---------------------------------
-    # Fetcher
-    # ---------------------------------
 
     fetcher = IngestionFetcher(
         wordpress_client=wordpress_client,
@@ -65,6 +58,8 @@ def run():
             bucket_name=S3_BUCKET_NAME
         )
 
+        storage.validate_connection()
+
     else:
         storage = LocalStorage()
 
@@ -73,10 +68,6 @@ def run():
     # Keep fetched data so we do not
     # download MEC definitions twice
     fetched_sources = {}
-
-    # ---------------------------------
-    # Fetch normal WordPress sources
-    # ---------------------------------
 
     for source_name in WORDPRESS_SOURCES:
 
@@ -103,9 +94,20 @@ def run():
             f"records from {source_name}"
         )
 
-    # ---------------------------------
-    # Resolve MEC occurrences
-    # ---------------------------------
+    membership_plans = (
+    wordpress_client.get_membership_level()
+        )
+
+    source_counts["membership_plans"] = len(
+        membership_plans
+        )
+
+    storage.save_source(
+            run_id=run_id,
+            source_name="membership_plans",
+            data=membership_plans
+        )
+
 
     event_definitions = fetched_sources[
         "mec_event_definitions"
@@ -124,9 +126,6 @@ def run():
         data=calendar_occurrences
     )
 
-    # ---------------------------------
-    # Manifest
-    # ---------------------------------
 
     manifest = {
         "run_id": run_id,
