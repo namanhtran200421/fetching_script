@@ -24,6 +24,10 @@ HTTP_MAX_RETRIES = int(os.getenv("HTTP_MAX_RETRIES", "3"))
 HTTP_RETRY_BACKOFF_SECONDS = float(
     os.getenv("HTTP_RETRY_BACKOFF_SECONDS", "1")
 )
+RAG_CHUNK_SIZE_CHARS = int(os.getenv("RAG_CHUNK_SIZE_CHARS", "1800"))
+RAG_CHUNK_OVERLAP_CHARS = int(
+    os.getenv("RAG_CHUNK_OVERLAP_CHARS", "200")
+)
 
 
 def _calendar_max_events():
@@ -40,9 +44,49 @@ def _calendar_max_events():
 MAX_CALENDAR_EVENTS = _calendar_max_events()
 
 
+def storage_config_errors():
+    errors = []
+
+    if STORAGE_MODE not in {"local", "s3"}:
+        errors.append("STORAGE_MODE must be 'local' or 's3'")
+    elif STORAGE_MODE == "s3" and not S3_BUCKET_NAME:
+        errors.append("S3_BUCKET_NAME is required when STORAGE_MODE=s3")
+
+    return errors
+
+
+def rag_config_errors():
+    errors = []
+
+    if RAG_CHUNK_SIZE_CHARS < 200:
+        errors.append("RAG_CHUNK_SIZE_CHARS must be at least 200")
+    if RAG_CHUNK_OVERLAP_CHARS < 0:
+        errors.append("RAG_CHUNK_OVERLAP_CHARS cannot be negative")
+    if RAG_CHUNK_OVERLAP_CHARS >= RAG_CHUNK_SIZE_CHARS:
+        errors.append(
+            "RAG_CHUNK_OVERLAP_CHARS must be smaller than "
+            "RAG_CHUNK_SIZE_CHARS"
+        )
+
+    return errors
+
+
+def _raise_config_errors(errors):
+    if errors:
+        raise ValueError("Invalid configuration: " + "; ".join(errors))
+
+
+def validate_storage_config():
+    _raise_config_errors(storage_config_errors())
+
+
+def validate_cleaning_config():
+    _raise_config_errors(storage_config_errors() + rag_config_errors())
+
+
 def validate_config():
     """Fail before fetching with one actionable configuration error."""
-    errors = []
+    errors = storage_config_errors() + rag_config_errors()
 
     required_values = {
         "WORDPRESS_BASE_URL": WORDPRESS_BASE_URL,
@@ -59,11 +103,6 @@ def validate_config():
         if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
             errors.append("WORDPRESS_BASE_URL must be an absolute HTTP(S) URL")
 
-    if STORAGE_MODE not in {"local", "s3"}:
-        errors.append("STORAGE_MODE must be 'local' or 's3'")
-    elif STORAGE_MODE == "s3" and not S3_BUCKET_NAME:
-        errors.append("S3_BUCKET_NAME is required when STORAGE_MODE=s3")
-
     if HTTP_TIMEOUT_SECONDS <= 0:
         errors.append("HTTP_TIMEOUT_SECONDS must be greater than zero")
     if HTTP_MAX_RETRIES < 0:
@@ -71,5 +110,4 @@ def validate_config():
     if HTTP_RETRY_BACKOFF_SECONDS < 0:
         errors.append("HTTP_RETRY_BACKOFF_SECONDS cannot be negative")
 
-    if errors:
-        raise ValueError("Invalid configuration: " + "; ".join(errors))
+    _raise_config_errors(errors)

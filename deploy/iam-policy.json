@@ -1,0 +1,28 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "InspectPipelineBucket",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::BUCKET_NAME"
+    },
+    {
+      "Sid": "ReadRawPipelineObjects",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::BUCKET_NAME/raw/*"
+    },
+    {
+      "Sid": "WritePipelineObjects",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": [
+        "arn:aws:s3:::BUCKET_NAME/raw/*",
+        "arn:aws:s3:::BUCKET_NAME/curated/*",
+        "arn:aws:s3:::BUCKET_NAME/quarantine/*",
+        "arn:aws:s3:::BUCKET_NAME/rag/*"
+      ]
+    }
+  ]
+}

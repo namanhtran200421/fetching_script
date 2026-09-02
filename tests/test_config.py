@@ -30,6 +30,14 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "S3_BUCKET_NAME is required"):
                 config.validate_config()
 
+    def test_rag_overlap_must_be_smaller_than_chunk(self):
+        with (
+            patch.object(config, "RAG_CHUNK_SIZE_CHARS", 500),
+            patch.object(config, "RAG_CHUNK_OVERLAP_CHARS", 500),
+        ):
+            with self.assertRaisesRegex(ValueError, "must be smaller"):
+                config.validate_cleaning_config()
+
 
 if __name__ == "__main__":
     unittest.main()

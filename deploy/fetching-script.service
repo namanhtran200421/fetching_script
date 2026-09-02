@@ -1,5 +1,5 @@
 [Unit]
-Description=WordPress ingestion fetch
+Description=WordPress ingestion, cleaning, and RAG preparation
 Wants=network-online.target
 After=network-online.target
 
@@ -9,7 +9,10 @@ User=ec2-user
 Group=ec2-user
 WorkingDirectory=/opt/fetching-script
 EnvironmentFile=/etc/fetching-script.env
-ExecStart=/opt/fetching-script/.venv/bin/python -m app.jobs.run_ingestion
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/fetching-script/.venv/bin/python -m app.jobs.run_pipeline
+TimeoutStartSec=0
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
