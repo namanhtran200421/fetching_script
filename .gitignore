@@ -2,4 +2,6 @@
 .env
 __pycache__/
 *.pyc
-data
+data/
+.coverage
+.DS_Store

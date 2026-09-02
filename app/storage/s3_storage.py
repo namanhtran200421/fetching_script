@@ -1,109 +1,49 @@
 import json
-import os
 
 import boto3
-from botocore.exceptions import ClientError, NoCredentialsError
+
 
 class S3Storage:
 
-    def __init__(
-        self,
-        bucket_name: str,
-        s3_client=None
-    ):
+    def __init__(self, bucket_name: str, s3_client=None):
         if not bucket_name:
             raise ValueError("S3 bucket name is required")
 
         self.bucket_name = bucket_name
+
+        # Let boto3 find the AWS login.
         self.s3_client = (
-            s3_client
-            if s3_client is not None
-            else boto3.client("s3", region_name=os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-1")),)
+            s3_client or boto3.client("s3")
         )
 
     def validate_connection(self):
-        try:
-            self.s3_client.head_bucket(
-                Bucket=self.bucket_name
-            )
-        except NoCredentialsError as error:
-            raise RuntimeError(
-                "AWS credentials were not found. Configure "
-                "boto3 credentials before using S3 storage."
-            ) from error
-        except ClientError as error:
-            error_code = error.response.get(
-                "Error",
-                {}
-            ).get("Code", "Unknown")
-
-            raise RuntimeError(
-                f"Cannot access S3 bucket "
-                f"'{self.bucket_name}' "
-                f"(AWS error {error_code})."
-            ) from error
+        # Make sure the bucket works before fetching data.
+        self.s3_client.head_bucket(Bucket=self.bucket_name)
 
         return f"s3://{self.bucket_name}"
 
     def _save_json(self, key: str, data):
-        body = json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2
-        ).encode("utf-8")
+        # Turn the data into JSON and send it to S3.
+        body = json.dumps(data, ensure_ascii=False)
 
-        try:
-            self.s3_client.put_object(
-                Bucket=self.bucket_name,
-                Key=key,
-                Body=body,
-                ContentType="application/json"
-            )
-        except NoCredentialsError as error:
-            raise RuntimeError(
-                "AWS credentials were not found. Configure "
-                "boto3 credentials before using S3 storage."
-            ) from error
-        except ClientError as error:
-            error_code = error.response.get(
-                "Error",
-                {}
-            ).get("Code", "Unknown")
-
-            raise RuntimeError(
-                f"Failed to upload s3://"
-                f"{self.bucket_name}/{key} "
-                f"(AWS error {error_code})."
-            ) from error
+        self.s3_client.put_object(
+            Bucket=self.bucket_name,
+            Key=key,
+            Body=body.encode("utf-8"),
+            ContentType="application/json",
+            ServerSideEncryption="AES256"
+        )
 
         return f"s3://{self.bucket_name}/{key}"
 
-    def save_source(
-        self,
-        run_id: str,
-        source_name: str,
-        data
-    ):
-        key = (
-            f"raw/{run_id}/"
-            f"{source_name}.json"
-        )
-
+    def save_source(self, run_id: str, source_name: str, data):
         return self._save_json(
-            key=key,
-            data=data
+            f"raw/{run_id}/{source_name}.json",
+            data
         )
 
-    def save_manifest(
-        self,
-        run_id: str,
-        manifest: dict
-    ):
-        key = (
-            f"raw/{run_id}/manifest.json"
-        )
-
+    def save_manifest(self, run_id: str, manifest: dict):
         return self._save_json(
-            key=key,
-            data=manifest
+            f"raw/{run_id}/manifest.json",
+            manifest
         )
