@@ -120,7 +120,7 @@ unchanged. Configure chunking with `RAG_CHUNK_SIZE_CHARS` and
    sudo journalctl -u fetching-script.service -n 100 --no-pager
    ```
 
-6. Once the manual run succeeds, enable the daily 02:00 UTC timer:
+6. Once the manual run succeeds, enable the weekly Monday 02:00 UTC timer:
 
    ```bash
    sudo systemctl enable --now fetching-script.timer

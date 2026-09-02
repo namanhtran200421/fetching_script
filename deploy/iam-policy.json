@@ -5,23 +5,23 @@
       "Sid": "InspectPipelineBucket",
       "Effect": "Allow",
       "Action": "s3:ListBucket",
-      "Resource": "arn:aws:s3:::BUCKET_NAME"
+      "Resource": "arn:aws:s3:::test13902183129321"
     },
     {
       "Sid": "ReadRawPipelineObjects",
       "Effect": "Allow",
       "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::BUCKET_NAME/raw/*"
+      "Resource": "arn:aws:s3:::test13902183129321/raw/*"
     },
     {
       "Sid": "WritePipelineObjects",
       "Effect": "Allow",
       "Action": "s3:PutObject",
       "Resource": [
-        "arn:aws:s3:::BUCKET_NAME/raw/*",
-        "arn:aws:s3:::BUCKET_NAME/curated/*",
-        "arn:aws:s3:::BUCKET_NAME/quarantine/*",
-        "arn:aws:s3:::BUCKET_NAME/rag/*"
+        "arn:aws:s3:::test13902183129321/raw/*",
+        "arn:aws:s3:::test13902183129321/curated/*",
+        "arn:aws:s3:::test13902183129321/quarantine/*",
+        "arn:aws:s3:::test13902183129321/rag/*"
       ]
     }
   ]
