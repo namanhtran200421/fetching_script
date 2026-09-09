@@ -1,8 +1,9 @@
+import asyncio
 import unittest
 
 import httpx
 
-from app.clients.http_client import RetryingHttpClient
+from app.clients.http_client import AsyncRetryingHttpClient, RetryingHttpClient
 
 
 class FakeResponse:
@@ -34,7 +35,32 @@ class FakeClient:
         return outcome
 
 
+class AsyncFakeClient(FakeClient):
+    async def get(self, url, **kwargs):
+        return super().get(url, **kwargs)
+
+
 class RetryingHttpClientTests(unittest.TestCase):
+    def test_async_client_retries_without_blocking_sleep(self):
+        fake = AsyncFakeClient([FakeResponse(503), FakeResponse(200)])
+        delays = []
+
+        async def record_delay(delay):
+            delays.append(delay)
+
+        client = AsyncRetryingHttpClient(
+            client=fake,
+            max_retries=1,
+            backoff_seconds=0.1,
+            sleep=record_delay,
+            jitter=lambda maximum: maximum,
+        )
+        response = asyncio.run(client.get("https://example.test"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(fake.call_count, 2)
+        self.assertEqual(delays, [0.1])
+
     def test_retries_retryable_status(self):
         fake = FakeClient([FakeResponse(503), FakeResponse(200)])
         delays = []
@@ -43,6 +69,7 @@ class RetryingHttpClientTests(unittest.TestCase):
             max_retries=2,
             backoff_seconds=0.25,
             sleep=delays.append,
+            jitter=lambda maximum: maximum,
         )
 
         response = client.get("https://example.test")
@@ -67,6 +94,28 @@ class RetryingHttpClientTests(unittest.TestCase):
         self.assertEqual(client.get("https://example.test").status_code, 200)
         self.assertEqual(fake.call_count, 2)
 
+    def test_retry_backoff_uses_full_jitter(self):
+        fake = FakeClient([FakeResponse(503), FakeResponse(200)])
+        maximums = []
+        delays = []
+
+        def midpoint_jitter(maximum):
+            maximums.append(maximum)
+            return maximum / 2
+
+        client = RetryingHttpClient(
+            client=fake,
+            max_retries=1,
+            backoff_seconds=2,
+            sleep=delays.append,
+            jitter=midpoint_jitter,
+        )
+
+        client.get("https://example.test")
+
+        self.assertEqual(maximums, [2])
+        self.assertEqual(delays, [1])
+
     def test_does_not_retry_non_retryable_status(self):
         fake = FakeClient([FakeResponse(404)])
         client = RetryingHttpClient(client=fake, max_retries=3)
@@ -74,6 +123,18 @@ class RetryingHttpClientTests(unittest.TestCase):
         with self.assertRaises(httpx.HTTPStatusError):
             client.get("https://example.test")
 
+        self.assertEqual(fake.call_count, 1)
+
+    def test_explicitly_accepted_error_status_preserves_response_body(self):
+        fake = AsyncFakeClient([FakeResponse(404)])
+        client = AsyncRetryingHttpClient(client=fake)
+
+        response = asyncio.run(client.get(
+            "https://example.test/wp-sitemap.xml",
+            accepted_status_codes={404},
+        ))
+
+        self.assertEqual(response.status_code, 404)
         self.assertEqual(fake.call_count, 1)
 
 

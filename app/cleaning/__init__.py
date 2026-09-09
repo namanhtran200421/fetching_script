@@ -1,1 +1,1 @@
-"""Raw-to-curated cleaning and RAG preparation."""
+"""Raw-to-cleaned full-document normalization and validation."""

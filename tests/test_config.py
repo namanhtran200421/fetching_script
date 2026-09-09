@@ -25,18 +25,26 @@ class ConfigTests(unittest.TestCase):
     def test_s3_requires_bucket(self):
         with (
             patch.object(config, "STORAGE_MODE", "s3"),
-            patch.object(config, "S3_BUCKET_NAME", None),
+            patch.object(config, "RAW_S3_BUCKET_NAME", None),
+            patch.object(config, "CLEANED_S3_BUCKET_NAME", None),
         ):
-            with self.assertRaisesRegex(ValueError, "S3_BUCKET_NAME is required"):
+            with self.assertRaisesRegex(ValueError, "RAW_S3_BUCKET_NAME"):
                 config.validate_config()
 
-    def test_rag_overlap_must_be_smaller_than_chunk(self):
-        with (
-            patch.object(config, "RAG_CHUNK_SIZE_CHARS", 500),
-            patch.object(config, "RAG_CHUNK_OVERLAP_CHARS", 500),
-        ):
-            with self.assertRaisesRegex(ValueError, "must be smaller"):
-                config.validate_cleaning_config()
+    def test_html_concurrency_must_be_positive(self):
+        with patch.object(config, "HTML_CRAWL_CONCURRENCY", 0):
+            with self.assertRaisesRegex(ValueError, "CONCURRENCY"):
+                config.validate_config()
+
+    def test_html_burst_size_must_be_positive(self):
+        with patch.object(config, "HTML_CRAWL_BURST_SIZE", 0):
+            with self.assertRaisesRegex(ValueError, "BURST_SIZE"):
+                config.validate_config()
+
+    def test_incremental_reconciliation_interval_must_be_positive(self):
+        with patch.object(config, "FULL_RECONCILIATION_INTERVAL_DAYS", 0):
+            with self.assertRaisesRegex(ValueError, "RECONCILIATION"):
+                config.validate_config()
 
 
 if __name__ == "__main__":

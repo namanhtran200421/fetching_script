@@ -1,8 +1,8 @@
 [Unit]
-Description=Run WordPress ingestion weekly
+Description=Run WordPress ingestion daily
 
 [Timer]
-OnCalendar=Mon *-*-* 02:00:00 UTC
+OnCalendar=*-*-* 02:00:00 UTC
 Persistent=true
 RandomizedDelaySec=5m
 Unit=fetching-script.service

@@ -2,26 +2,33 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "InspectPipelineBucket",
+      "Sid": "InspectPipelineBuckets",
       "Effect": "Allow",
       "Action": "s3:ListBucket",
-      "Resource": "arn:aws:s3:::test13902183129321"
+      "Resource": [
+        "arn:aws:s3:::RAW_BUCKET_NAME",
+        "arn:aws:s3:::CLEANED_BUCKET_NAME"
+      ]
     },
     {
       "Sid": "ReadRawPipelineObjects",
       "Effect": "Allow",
       "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::test13902183129321/raw/*"
+      "Resource": "arn:aws:s3:::RAW_BUCKET_NAME/raw/*"
     },
     {
-      "Sid": "WritePipelineObjects",
+      "Sid": "WriteRawPipelineObjects",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::RAW_BUCKET_NAME/raw/*"
+    },
+    {
+      "Sid": "WriteCleanedPipelineObjects",
       "Effect": "Allow",
       "Action": "s3:PutObject",
       "Resource": [
-        "arn:aws:s3:::test13902183129321/raw/*",
-        "arn:aws:s3:::test13902183129321/curated/*",
-        "arn:aws:s3:::test13902183129321/quarantine/*",
-        "arn:aws:s3:::test13902183129321/rag/*"
+        "arn:aws:s3:::CLEANED_BUCKET_NAME/cleaned/*",
+        "arn:aws:s3:::CLEANED_BUCKET_NAME/quarantine/*"
       ]
     }
   ]

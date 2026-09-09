@@ -1,28 +1,27 @@
 import logging
 from datetime import datetime, timezone
 
-from app.cleaning.chunking import document_to_chunks
 from app.cleaning.normalizers import (
+    SCHEMA_VERSION,
     normalize_calendar_event,
     normalize_membership_plan,
     normalize_wordpress_record,
 )
 from app.cleaning.validators import validate_document
-from app.ingestion.source_registry import WORDPRESS_SOURCES
+from app.ingestion.source_registry import SOURCES
 
 
 LOGGER = logging.getLogger(__name__)
-CLEANING_VERSION = "1.0"
+CLEANING_VERSION = "2.1"
 
 
 class CleaningPipeline:
-    def __init__(self, storage, chunk_size: int, chunk_overlap: int):
+    def __init__(self, storage):
         self.storage = storage
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
 
     def clean_run(self, run_id: str):
         started_at = datetime.now(timezone.utc)
+        LOGGER.info("Starting cleaning run %s", run_id)
         raw_manifest = self.storage.load_manifest(run_id)
         raw_status = raw_manifest.get("status")
         if (
@@ -42,13 +41,31 @@ class CleaningPipeline:
                 f"status is {raw_manifest.get('status')!r}"
             )
 
-        source_counts = {}
-        quarantine_counts = {}
-        chunk_counts = {}
-        all_chunks = []
+        source_counts: dict = {}
+        quarantine_counts: dict = {}
+        cleaned_outputs: dict = {}
+        unavailable_sources = []
+        manifest_source_counts = raw_manifest.get("source_counts")
+        manifest_has_inventory = (
+            isinstance(manifest_source_counts, dict)
+            and bool(manifest_source_counts)
+        )
 
         try:
-            for source_name, source_config in WORDPRESS_SOURCES.items():
+            for source_name, source_config in SOURCES.items():
+                if (
+                    manifest_has_inventory
+                    and source_name not in manifest_source_counts
+                ):
+                    # A source added after this immutable raw run cannot exist
+                    # in that run. Keep historical runs re-cleanable.
+                    unavailable_sources.append(source_name)
+                    LOGGER.info(
+                        "Skipping %s because it is unavailable in this raw run",
+                        source_name,
+                    )
+                    continue
+                LOGGER.info("Cleaning source %s", source_name)
                 raw_records = self.storage.load_source(run_id, source_name)
                 if not isinstance(raw_records, list):
                     raise ValueError(f"Raw source {source_name} must be a list")
@@ -59,81 +76,91 @@ class CleaningPipeline:
                         record, source_name, source_config, run_id
                     ),
                 )
-                chunks = self._write_source(
+                self._write_source(
                     run_id,
                     source_name,
                     documents,
                     normalization_failures,
                     source_counts,
                     quarantine_counts,
-                    chunk_counts,
+                    cleaned_outputs,
                 )
-                all_chunks.extend(chunks)
 
-            membership_chunks = self._clean_memberships(
+            self._clean_memberships(
                 run_id,
                 source_counts,
                 quarantine_counts,
-                chunk_counts,
+                cleaned_outputs,
             )
-            all_chunks.extend(membership_chunks)
 
-            calendar_chunks = self._clean_calendar(
+            self._clean_calendar(
                 run_id,
                 source_counts,
                 quarantine_counts,
-                chunk_counts,
+                cleaned_outputs,
             )
-            all_chunks.extend(calendar_chunks)
 
-            self.storage.save_rag_chunks(run_id, "chunks", all_chunks)
             total_quarantined = sum(quarantine_counts.values())
-            completed_at = datetime.now(timezone.utc).isoformat()
+            completed_at = datetime.now(timezone.utc)
+            status = (
+                "complete_with_errors"
+                if total_quarantined or raw_status == "complete_with_errors"
+                else "complete"
+            )
             manifest = {
                 "run_id": run_id,
-                "status": (
-                    "complete_with_errors" if total_quarantined else "complete"
-                ),
+                "status": status,
                 "cleaning_version": CLEANING_VERSION,
+                "document_schema_version": SCHEMA_VERSION,
+                "canonical_content_field": "content_markdown",
+                "content_format": "text/markdown",
                 "started_at": started_at.isoformat(),
-                "completed_at": completed_at,
+                "completed_at": completed_at.isoformat(),
+                "duration_seconds": round(
+                    (completed_at - started_at).total_seconds(), 3
+                ),
                 "raw_manifest_status": raw_status,
                 "source_counts": source_counts,
                 "quarantine_counts": quarantine_counts,
-                "chunk_counts": chunk_counts,
                 "total_documents": sum(source_counts.values()),
                 "total_quarantined": total_quarantined,
-                "total_chunks": len(all_chunks),
-                "rag_output": f"rag/{run_id}/chunks.jsonl",
-                "chunking": {
-                    "strategy": "paragraph-aware-character",
-                    "size_chars": self.chunk_size,
-                    "overlap_chars": self.chunk_overlap,
-                },
+                "output_format": "application/x-ndjson",
+                "cleaned_outputs": cleaned_outputs,
+                "unavailable_sources": unavailable_sources,
+                "quality_gate_passed": status == "complete",
+                "published_latest": True,
             }
-            self.storage.save_curated_manifest(run_id, manifest)
-            self.storage.save_rag_manifest(run_id, manifest)
+            manifest_path = self.storage.save_cleaned_manifest(
+                run_id, manifest
+            )
+            self.storage.publish_cleaned_latest(
+                run_id, manifest_path, status=status
+            )
             LOGGER.info(
-                "Cleaned run %s into %d documents and %d RAG chunks",
+                "Cleaned run %s into %d full documents (%s)",
                 run_id,
                 manifest["total_documents"],
-                manifest["total_chunks"],
+                status,
             )
             return manifest
         except Exception as error:
+            completed_at = datetime.now(timezone.utc)
             failure_manifest = {
                 "run_id": run_id,
                 "status": "failed",
                 "cleaning_version": CLEANING_VERSION,
                 "started_at": started_at.isoformat(),
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": completed_at.isoformat(),
+                "duration_seconds": round(
+                    (completed_at - started_at).total_seconds(), 3
+                ),
                 "error": {
                     "type": type(error).__name__,
                     "message": str(error),
                 },
             }
             try:
-                self.storage.save_curated_manifest(run_id, failure_manifest)
+                self.storage.save_cleaned_manifest(run_id, failure_manifest)
             except Exception:
                 LOGGER.exception("Could not save cleaning failure manifest")
             raise
@@ -146,34 +173,31 @@ class CleaningPipeline:
         initial_rejections,
         source_counts,
         quarantine_counts,
-        chunk_counts,
+        cleaned_outputs,
     ):
         clean, rejected = self._validate_and_deduplicate(documents)
         rejected = [*initial_rejections, *rejected]
-        chunks = [
-            chunk
-            for document in clean
-            for chunk in document_to_chunks(
-                document,
-                self.chunk_size,
-                self.chunk_overlap,
-            )
-        ]
-
-        self.storage.save_curated_source(run_id, source_name, clean)
+        output_path = self.storage.save_cleaned_source(
+            run_id, source_name, clean
+        )
         self.storage.save_quarantine(run_id, source_name, rejected)
-        self.storage.save_rag_chunks(run_id, source_name, chunks)
         source_counts[source_name] = len(clean)
         quarantine_counts[source_name] = len(rejected)
-        chunk_counts[source_name] = len(chunks)
-        return chunks
+        cleaned_outputs[source_name] = str(output_path)
+        LOGGER.info(
+            "Cleaned %s: accepted=%d quarantined=%d output=%s",
+            source_name,
+            len(clean),
+            len(rejected),
+            output_path,
+        )
 
     def _clean_memberships(
         self,
         run_id,
         source_counts,
         quarantine_counts,
-        chunk_counts,
+        cleaned_outputs,
     ):
         raw = self.storage.load_source(run_id, "membership_plans")
         if isinstance(raw, dict):
@@ -196,7 +220,7 @@ class CleaningPipeline:
             normalization_failures,
             source_counts,
             quarantine_counts,
-            chunk_counts,
+            cleaned_outputs,
         )
 
     def _clean_calendar(
@@ -204,7 +228,7 @@ class CleaningPipeline:
         run_id,
         source_counts,
         quarantine_counts,
-        chunk_counts,
+        cleaned_outputs,
     ):
         raw = self.storage.load_source(run_id, "calendar_occurrences")
         if not isinstance(raw, dict):
@@ -231,7 +255,7 @@ class CleaningPipeline:
             [*failures, *normalization_failures],
             source_counts,
             quarantine_counts,
-            chunk_counts,
+            cleaned_outputs,
         )
 
     @staticmethod
@@ -257,6 +281,7 @@ class CleaningPipeline:
         clean = []
         rejected = []
         seen = set()
+        seen_content_hashes = set()
 
         for document in documents:
             errors = validate_document(document)
@@ -265,6 +290,13 @@ class CleaningPipeline:
                 errors.append("duplicate document_id")
             else:
                 seen.add(document_id)
+
+            content_hash = document.get("metadata", {}).get("content_hash")
+            if content_hash:
+                if content_hash in seen_content_hashes:
+                    errors.append("duplicate cleaned content")
+                else:
+                    seen_content_hashes.add(content_hash)
 
             if errors:
                 rejected.append({"errors": errors, "record": document})

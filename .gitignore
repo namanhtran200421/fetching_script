@@ -5,3 +5,4 @@ __pycache__/
 data/
 .coverage
 .DS_Store
+.vscode/

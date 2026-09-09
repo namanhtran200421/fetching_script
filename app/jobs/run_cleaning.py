@@ -3,10 +3,9 @@ import logging
 
 from app.cleaning.pipeline import CleaningPipeline
 from app.config import (
+    CLEANED_S3_BUCKET_NAME,
     LOCAL_DATA_DIR,
-    RAG_CHUNK_OVERLAP_CHARS,
-    RAG_CHUNK_SIZE_CHARS,
-    S3_BUCKET_NAME,
+    RAW_S3_BUCKET_NAME,
     STORAGE_MODE,
     validate_cleaning_config,
 )
@@ -19,7 +18,10 @@ def build_storage():
         return LocalStorage(LOCAL_DATA_DIR)
 
     if STORAGE_MODE == "s3":
-        storage = S3Storage(S3_BUCKET_NAME)
+        storage = S3Storage(
+            RAW_S3_BUCKET_NAME,
+            cleaned_bucket_name=CLEANED_S3_BUCKET_NAME,
+        )
         storage.validate_connection()
         return storage
 
@@ -29,11 +31,7 @@ def build_storage():
 def run(run_id: str, storage=None):
     validate_cleaning_config()
     storage = storage or build_storage()
-    pipeline = CleaningPipeline(
-        storage,
-        chunk_size=RAG_CHUNK_SIZE_CHARS,
-        chunk_overlap=RAG_CHUNK_OVERLAP_CHARS,
-    )
+    pipeline = CleaningPipeline(storage)
     return pipeline.clean_run(run_id)
 
 
@@ -43,7 +41,7 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     parser = argparse.ArgumentParser(
-        description="Clean a completed raw ingestion run and create RAG chunks"
+        description="Normalize a completed raw ingestion run into clean JSONL"
     )
     parser.add_argument("--run-id", required=True)
     arguments = parser.parse_args()
