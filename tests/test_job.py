@@ -17,8 +17,12 @@ class WordPressClient:
         fields,
         include=None,
         modified_after=None,
+        extra_params=None,
     ):
-        return [{"id": 1}]
+        return [{"id": 1, "link": "https://example.test/one/"}]
+
+    def get_terms(self, taxonomy_endpoint, fields=None):
+        return [{"id": 1, "name": "Insights", "slug": "insights"}]
 
     def search_all(self, subtype):
         return [{"id": 1, "title": "Event", "url": "https://example.test/events/one/"}]
@@ -31,11 +35,40 @@ class FailingWordPressClient:
         fields,
         include=None,
         modified_after=None,
+        extra_params=None,
     ):
+        raise RuntimeError("source unavailable")
+
+    def get_terms(self, taxonomy_endpoint, fields=None):
         raise RuntimeError("source unavailable")
 
     def search_all(self, subtype):
         raise RuntimeError("source unavailable")
+
+
+class MediaClient:
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.__class__.instances.append(self)
+
+    def list_documents(self, fields=None, modified_after=None):
+        return [{
+            "id": 1,
+            "mime_type": "application/pdf",
+            "source_url": "https://atlas.culturalinfusion.com/a.pdf",
+            "modified_gmt": "2026-09-01T00:00:00",
+        }]
+
+    def read_documents(self, attachments):
+        return {
+            "documents": [
+                {**item, "content_text": "Report text", "page_count": 2}
+                for item in attachments
+            ],
+            "failures": [],
+        }
 
 
 class MecClient:
@@ -150,6 +183,13 @@ class MemoryStorage:
 
 
 class IngestionJobTests(unittest.TestCase):
+    def _record_wordpress_client(self, wordpress_client):
+        """Return a factory that captures how each client was constructed."""
+        def build(**kwargs):
+            self.wordpress_client_kwargs.append(kwargs)
+            return wordpress_client
+        return build
+
     def run_with_wordpress(
         self,
         wordpress_client,
@@ -157,6 +197,8 @@ class IngestionJobTests(unittest.TestCase):
         pmpro_client=None,
     ):
         crawler_class.instances = []
+        MediaClient.instances = []
+        self.wordpress_client_kwargs = []
         storage = MemoryStorage()
         patches = [
             patch.object(run_ingestion, "validate_config"),
@@ -165,8 +207,9 @@ class IngestionJobTests(unittest.TestCase):
             patch.object(
                 run_ingestion,
                 "WordPressClient",
-                return_value=wordpress_client,
+                side_effect=self._record_wordpress_client(wordpress_client),
             ),
+            patch.object(run_ingestion, "MediaClient", MediaClient),
             patch.object(run_ingestion, "MecCalendarClient", return_value=MecClient()),
             patch.object(
                 run_ingestion,
@@ -222,6 +265,60 @@ class IngestionJobTests(unittest.TestCase):
                 run_ingestion.WORDPRESS_APP_PASSWORD,
             ),
         )
+
+    def test_public_rest_and_media_clients_are_built_without_credentials(self):
+        self.run_with_wordpress(WordPressClient())
+
+        run_ingestion.run()
+
+        public = [
+            kwargs for kwargs in self.wordpress_client_kwargs
+            if kwargs["base_url"] != run_ingestion.WORDPRESS_BASE_URL
+        ]
+        membership = [
+            kwargs for kwargs in self.wordpress_client_kwargs
+            if kwargs["base_url"] == run_ingestion.WORDPRESS_BASE_URL
+        ]
+
+        self.assertTrue(public)
+        for kwargs in public:
+            self.assertIsNone(kwargs["username"])
+            self.assertIsNone(kwargs["application_password"])
+        # One client per external origin, not one per source.
+        self.assertEqual(
+            len({kwargs["base_url"] for kwargs in public}), len(public)
+        )
+        self.assertEqual(len(membership), 1)
+        self.assertEqual(
+            membership[0]["username"], run_ingestion.WORDPRESS_USERNAME
+        )
+
+        # The media client borrows that unauthenticated client for listing.
+        media_client = MediaClient.instances[0]
+        self.assertNotEqual(
+            media_client.kwargs["base_url"], run_ingestion.WORDPRESS_BASE_URL
+        )
+
+    def test_public_atlas_sources_are_registered_as_public(self):
+        public_sources = {
+            name: config for name, config in WORDPRESS_SOURCES.items()
+            if config.get("base_url")
+        }
+
+        self.assertIn("atlas_posts", public_sources)
+        for name, config in public_sources.items():
+            with self.subTest(source=name):
+                self.assertEqual(config["access_class"], "public")
+                # One shared crawler caches a single sitemap index per
+                # origin, so the sources on it must agree on its path.
+                if config.get("sitemap_path"):
+                    self.assertEqual(
+                        config["sitemap_path"], "/sitemap_index.xml"
+                    )
+
+        # The public site's events are teaser stubs whose full text is
+        # already ingested from the membership site.
+        self.assertNotIn("atlas_mec_events", WORDPRESS_SOURCES)
 
     def test_success_writes_complete_manifest(self):
         storage = self.run_with_wordpress(WordPressClient())

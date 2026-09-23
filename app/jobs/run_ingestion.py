@@ -2,6 +2,10 @@ import logging
 from datetime import datetime, timezone
 
 from app.config import (
+    ATLAS_MEDIA_MAX_BYTES,
+    ATLAS_MEDIA_MAX_PDF_PAGES,
+    ATLAS_MEDIA_MIME_TYPES,
+    ATLAS_PAGE_DENYLIST,
     FULL_RECONCILIATION_INTERVAL_DAYS,
     HTTP_MAX_RETRIES,
     HTTP_RETRY_BACKOFF_SECONDS,
@@ -30,6 +34,7 @@ from app.config import (
 )
 from app.clients.http_client import RetryingHttpClient
 from app.clients.mec_client import MecCalendarClient
+from app.clients.media_client import MediaClient
 from app.clients.pmpro_client import PMProClient
 from app.clients.wordpress_client import WordPressClient
 from app.ingestion.fetcher import IngestionFetcher
@@ -157,6 +162,9 @@ def run(storage=None, started_at=None, run_id=None):
             )
             external_html_crawlers = {}
             external_crawlers_by_origin = {}
+            external_wordpress_clients = {}
+            external_media_clients = {}
+            external_clients_by_origin = {}
             for source_name, source_config in SOURCES.items():
                 source_base_url = source_config.get("base_url")
                 if not source_base_url:
@@ -166,6 +174,37 @@ def run(storage=None, started_at=None, run_id=None):
                 # one unauthenticated crawler per origin so future same-host
                 # sources share one robots policy and one request-rate budget.
                 origin = source_base_url.rstrip("/").lower()
+
+                # The same boundary applies to the REST and media APIs: these
+                # clients are constructed without credentials, so no
+                # authenticated request can be made against an external origin.
+                external_client = external_clients_by_origin.get(origin)
+                if external_client is None:
+                    external_client = WordPressClient(
+                        base_url=source_base_url,
+                        username=None,
+                        application_password=None,
+                        http_client=http_client,
+                        async_concurrency=HTML_CRAWL_CONCURRENCY,
+                        timeout=HTTP_TIMEOUT_SECONDS,
+                        max_retries=HTTP_MAX_RETRIES,
+                        backoff_seconds=HTTP_RETRY_BACKOFF_SECONDS,
+                    )
+                    external_clients_by_origin[origin] = external_client
+                external_wordpress_clients[source_name] = external_client
+                if source_config["acquisition_method"] == "media_files":
+                    external_media_clients[source_name] = MediaClient(
+                        base_url=source_base_url,
+                        wordpress_client=external_client,
+                        mime_types=ATLAS_MEDIA_MIME_TYPES,
+                        max_response_bytes=ATLAS_MEDIA_MAX_BYTES,
+                        max_pdf_pages=ATLAS_MEDIA_MAX_PDF_PAGES,
+                        async_concurrency=HTML_CRAWL_CONCURRENCY,
+                        timeout=HTTP_TIMEOUT_SECONDS,
+                        max_retries=HTTP_MAX_RETRIES,
+                        backoff_seconds=HTTP_RETRY_BACKOFF_SECONDS,
+                    )
+
                 crawler = external_crawlers_by_origin.get(origin)
                 if crawler is None:
                     crawler = HtmlCrawler(
@@ -192,6 +231,9 @@ def run(storage=None, started_at=None, run_id=None):
                 mec_client,
                 html_crawler=html_crawler,
                 html_crawlers=external_html_crawlers,
+                wordpress_clients=external_wordpress_clients,
+                media_clients=external_media_clients,
+                slug_denylists={"ATLAS_PAGE_DENYLIST": ATLAS_PAGE_DENYLIST},
                 wordpress_page_allowlist=WORDPRESS_PAGE_ALLOWLIST,
                 max_calendar_events=MAX_CALENDAR_EVENTS,
             )

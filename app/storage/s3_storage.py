@@ -4,6 +4,7 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
 from app.storage.naming import source_file_stem
+from app.storage.serialization import json_line
 
 
 class S3Storage:
@@ -166,7 +167,7 @@ class S3Storage:
 
     def _save_jsonl(self, key: str, rows, bucket_name=None):
         body = "".join(
-            json.dumps(row, ensure_ascii=False) + "\n"
+            json_line(row) + "\n"
             for row in rows
         )
         self.s3_client.put_object(

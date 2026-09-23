@@ -27,6 +27,7 @@ CLEANING_NOISE_SELECTORS = (
     ".sharedaddy", ".social-share",
 )
 SAFE_LINK_SCHEMES = {"http", "https", "mailto", "tel"}
+UNICODE_LINE_BREAKS = re.compile("[\u2028\u2029\u0085]")
 
 
 class _TextExtractor(HTMLParser):
@@ -74,6 +75,10 @@ def clean_markdown(value):
     if not value:
         return ""
     normalized = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    # U+2028/U+2029/U+0085 are line breaks that sit above the control-character
+    # filter below, so they would otherwise survive into the JSONL output and
+    # split one document across two lines for any Unicode-aware line reader.
+    normalized = UNICODE_LINE_BREAKS.sub("\n", normalized)
     normalized = normalized.replace("\xa0", " ")
     normalized = "".join(
         character
@@ -371,7 +376,33 @@ def _content_hash(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def normalize_wordpress_record(record, source_name, source_config, run_id):
+def _resolved_term_names(record, source_config, taxonomy_terms):
+    """Turn numeric taxonomy IDs into names using the fetched term tables."""
+    resolved = {}
+    if not taxonomy_terms:
+        return resolved
+    for field, taxonomy in (source_config.get("taxonomy_fields") or {}).items():
+        term_ids = record.get(field)
+        if not isinstance(term_ids, list):
+            continue
+        table = taxonomy_terms.get(taxonomy) or {}
+        names = [
+            table[term_id]["name"]
+            for term_id in term_ids
+            if term_id in table and table[term_id].get("name")
+        ]
+        if names:
+            # "categories" -> "category_names", "tags" -> "tag_names"
+            singular = field[:-3] + "y" if field.endswith("ies") else (
+                field[:-1] if field.endswith("s") else field
+            )
+            resolved[f"{singular}_names"] = names
+    return resolved
+
+
+def normalize_wordpress_record(
+    record, source_name, source_config, run_id, taxonomy_terms=None
+):
     title_html = rendered(record.get("title"))
     content_html = rendered(record.get("content_html")) or rendered(
         record.get("content")
@@ -425,6 +456,66 @@ def normalize_wordpress_record(record, source_name, source_config, run_id):
             "sitemap_lastmod": record.get("sitemap_lastmod"),
             "wordpress_id": record.get("wordpress_id"),
             "wordpress_subtype": record.get("wordpress_subtype"),
+            **_resolved_term_names(record, source_config, taxonomy_terms),
+        },
+    }
+
+
+def normalize_media_document(
+    record, source_name, source_config, run_id, taxonomy_terms=None
+):
+    """Normalize a published attachment whose text was read at ingestion."""
+    source_id = record.get("id")
+    title = html_to_text(rendered(record.get("title")))
+    caption = html_to_text(rendered(record.get("caption")))
+    content_text = clean_plain_text(record.get("content_text"))
+    if not content_text:
+        raise ValueError("media document has no extracted text")
+
+    # The source is a binary file, so there is no source HTML to preserve.
+    # The extracted text is the document, and paragraph breaks from the page
+    # boundaries are the only structure the text layer reliably provides.
+    body_markdown = clean_markdown("\n\n".join(
+        _escape_markdown_inline(block.strip())
+        for block in str(record.get("content_text") or "").split("\n\n")
+        if block.strip()
+    ))
+    content_markdown = with_document_title(body_markdown, title)
+
+    media_details = record.get("media_details")
+    media_details = media_details if isinstance(media_details, dict) else {}
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "document_id": f"{source_name}:{source_id}",
+        "run_id": run_id,
+        "source": source_name,
+        "source_id": source_id,
+        "content_type": source_config["content_type"],
+        "access_class": source_config["access_class"],
+        "title": title,
+        "content_format": "text/markdown",
+        "content_html": "",
+        "content_text": content_text,
+        "content_markdown": content_markdown,
+        "modified_at": record.get("modified_gmt") or record.get("modified"),
+        "url": record.get("source_url"),
+        "metadata": {
+            "mime_type": record.get("mime_type"),
+            "file_name": record.get("source_url", "").rsplit("/", 1)[-1],
+            "byte_size": record.get("byte_size") or media_details.get("filesize"),
+            "page_count": record.get("page_count"),
+            "caption": caption,
+            "alt_text": clean_plain_text(record.get("alt_text")),
+            "attachment_page_url": record.get("link"),
+            "source_url": record.get("source_url"),
+            "canonical_url": record.get("source_url"),
+            "acquisition_method": record.get(
+                "acquisition_method", source_config["acquisition_method"]
+            ),
+            "published_at": record.get("date_gmt"),
+            "extraction_warnings": record.get("extraction_warnings", []),
+            "content_hash": _content_hash(content_markdown),
         },
     }
 

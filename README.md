@@ -1,11 +1,17 @@
 # WordPress ingestion and clean-data pipeline
 
 Fetches WordPress REST content, PMPro membership levels, and MEC calendar
-occurrences, and performs bounded HTML crawls for sitemap-only content. Each
-scheduled run preserves the source responses, normalizes and validates complete
-documents, and writes clean JSONL files to local storage or Amazon S3. It does not
-chunk, embed, or index documents; those remain the responsibility of the downstream
-RAG pipeline.
+occurrences from the members' site, plus the articles, pages, case studies, and
+published PDFs of the public Atlas website, and performs bounded HTML crawls for
+sitemap-only content. Each scheduled run preserves the source responses,
+normalizes and validates complete documents, and writes clean JSONL files to local
+storage or Amazon S3. It does not chunk, embed, or index documents; those remain
+the responsibility of the downstream RAG pipeline.
+
+Documents carry an `access_class`, so the downstream pipeline can separate
+`member_restricted` material from the `public` corpus. The two origins are kept
+strictly apart at the client layer: clients for the public site are constructed
+without credentials, so a membership application password cannot be sent there.
 
 Info Hub and Anthropedia are deliberately not fetched from `epkb-admin` or their
 unavailable custom REST routes. They are discovered through both WordPress search
@@ -22,6 +28,68 @@ the site with an incorrect HTTP 404 status. Known content types remain REST-firs
 Sitemap-only AI profiles, AI questions, portfolio items, taxonomy archives, and any
 new sitemap types added later are acquired from normal HTML pages. Search results
 and sitemap entries provide URLs only; titles and content come from those pages.
+
+## Public Atlas website
+
+The same host publishes a substantial content site of its own, and it is ingested
+alongside the membership sources. Everything fetched there is public, so those
+documents carry `access_class: "public"` and the downstream RAG pipeline can quote
+them to non-members without exposing member-restricted material.
+
+| Source | Output | Contents |
+| --- | --- | --- |
+| `atlas_posts` | `atlas-posts.jsonl` | The public blog: analysis, insights, news, and research write-ups. |
+| `atlas_pages` | `atlas-pages.jsonl` | Product, methodology, compliance, and company pages. |
+| `atlas_case_studies` | `atlas-case-studies.jsonl` | Published customer case studies. |
+| `atlas_media_documents` | `atlas-media-documents.jsonl` | Published PDFs: research papers, reports, and playbooks, with their text extracted. |
+| `atlas_taxonomies` | `atlas-taxonomies.json` | Reference data only. Category, tag, and event-category terms used to resolve numeric taxonomy IDs into names. |
+
+These sources are fetched with a WordPress client and a media client that are
+constructed **without credentials**, for the same reason the FAQ crawler is: an
+application password must never reach an origin it does not belong to. All six
+public sources share one crawler and one client per origin, so they also share a
+single robots policy, request-rate budget, and cached sitemap index. They must
+therefore agree on `sitemap_path`, which is `/sitemap_index.xml` on this host.
+
+`atlas_taxonomies` is a *reference* source. It is fetched, stored, and covered by
+the quality gate like any other, but it never becomes a document. The cleaning
+stage loads it to add `metadata.category_names` and `metadata.tag_names` to public
+posts, so retrieval can use the editorial taxonomy rather than bare term IDs.
+
+Several advertised endpoints are deliberately not ingested:
+
+- `wp/v2/mec-events` returns teaser stubs that end in a register-to-read-more link
+  pointing back at the membership site. The full event text is already ingested as
+  `mec_event_definitions`, so 1374 near-duplicate stubs would only dilute retrieval.
+  Its `mec_category` terms are still collected through `atlas_taxonomies`.
+- `epkb_post_type_1`, `echo_kb_faq`, `rm_content_editor`, and their taxonomies are
+  empty on this site: the plugins are installed but unused. Registering an
+  always-empty source would fail the quality gate on every run.
+- `wp/v2/yeepdf` exposes no content field, and `wp/v2/navigation` holds block
+  markup rather than prose.
+- `wp/v2/menus` and `wp/v2/menu-items` require authentication, which this host is
+  never given.
+- `mecapi/v1/events` requires a token issued for this host. The configured
+  `MEC_API_TOKEN` belongs to the membership host and is not forwarded. The
+  unauthenticated `mec/v1/events` route returns an empty list.
+
+### Published PDFs
+
+PDF attachments are listed through `wp/v2/media`, downloaded with bounded
+concurrency, and read with `pypdf`. Only the extracted text is kept: the raw layer
+stores a readable document and the complete media API object rather than tens of
+megabytes of base64, which keeps a run re-cleanable without downloading the files
+again. This is the one deliberate narrowing of "immutable source responses".
+
+Size is checked twice, first against the `filesize` the API reports and again
+against the received body, so a stale or missing declared size cannot bypass
+`ATLAS_MEDIA_MAX_BYTES`. An attachment served from another host is refused before
+any request is made. Extraction is text-layer only: a scanned, image-only or
+password-protected PDF is reported as a source failure rather than written as an
+empty document, because OCR is out of scope for this job.
+
+Incremental runs list every attachment but re-read only those whose `modified_gmt`
+has changed, reusing the stored text for the rest.
 
 ## Data layers
 
@@ -71,7 +139,33 @@ The file is intentionally ignored by Git.
 
 Set `WORDPRESS_PAGE_ALLOWLIST` only when you want to restrict normal WordPress
 pages to specific IDs, for example `WORDPRESS_PAGE_ALLOWLIST=123,456`. An empty
-value fetches every published page. HTML crawls are bounded by
+value fetches every published page.
+
+The public Atlas sources need no credentials and have their own settings, all
+optional:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `ATLAS_PUBLIC_BASE_URL` | `https://atlas.culturalinfusion.com` | Origin for every public source, including the FAQ crawl. |
+| `ATLAS_PAGE_DENYLIST` | see below | Page slugs to exclude. Setting it **replaces** the default; an empty value disables filtering. |
+| `ATLAS_MEDIA_MIME_TYPES` | `application/pdf` | Attachment types to ingest. |
+| `ATLAS_MEDIA_MAX_BYTES` | `26214400` | Largest attachment that will be downloaded. |
+| `ATLAS_MEDIA_MAX_PDF_PAGES` | `500` | Page cap per PDF; a longer file is truncated and the document records a warning. |
+
+`ATLAS_PAGE_DENYLIST` defaults to:
+
+```text
+faq,test,test-2,page-not-found,sign-in,security-quiz,security-quiz-2,deck,survey-config
+```
+
+`faq` is excluded because the
+dedicated `faq` source already ingests that page in full, and the rest are
+placeholders, sign-in and error pages, or shells whose bodies are entirely forms
+or an external embed. Every one of them cleans to an empty document, so leaving
+them in would quarantine records on every run and permanently report
+`complete_with_errors`.
+
+HTML crawls are bounded by
 `HTML_CRAWL_MAX_PAGES` (default `5000`) and `HTML_CRAWL_MAX_SITEMAPS` (default `100`).
 Redirects are bounded by
 `HTML_CRAWL_MAX_REDIRECTS` (default `5`). Requests run asynchronously with bounded
@@ -80,9 +174,11 @@ Redirects are bounded by
 the existing `HTTP_TIMEOUT_SECONDS`, `HTTP_MAX_RETRIES`, and
 `HTTP_RETRY_BACKOFF_SECONDS` settings.
 
-`HTML_CRAWL_RESPECT_ROBOTS=true` is the safe default. The live site currently
-declares `Crawl-delay: 30`, so crawler requests are started 30 seconds
-apart even though parsing and network I/O remain asynchronous. Set
+`HTML_CRAWL_RESPECT_ROBOTS=true` is the safe default. The membership site
+currently declares `Crawl-delay: 30`, so crawler requests are started 30 seconds
+apart even though parsing and network I/O remain asynchronous. The public Atlas
+host declares no crawl delay, and each origin's crawler holds its own policy and
+rate budget, so the slower host does not throttle the faster one. Set
 `HTML_CRAWL_MIN_REQUEST_INTERVAL_SECONDS` (default `1`) to enforce a fallback
 minimum when robots rules are unavailable. When a valid robots file has no crawl
 delay, a token bucket permits up to `HTML_CRAWL_BURST_SIZE` concurrent starts
@@ -178,9 +274,19 @@ Bedrock `.md` files.
 
 New runs produce `research.jsonl`, `info-hub.jsonl`, `anthropedia.jsonl`,
 `cign-events.jsonl`, `pages.jsonl`, `faq.jsonl`, `website-sitemap.jsonl`,
-`mec-event-definitions.jsonl`, `membership-plans.jsonl`, and
-`calendar-occurrences.jsonl`. `website-sitemap.jsonl` holds sitemap-only and newly
+`mec-event-definitions.jsonl`, `membership-plans.jsonl`,
+`calendar-occurrences.jsonl`, and, from the public Atlas website,
+`atlas-posts.jsonl`, `atlas-pages.jsonl`, `atlas-case-studies.jsonl`, and
+`atlas-media-documents.jsonl`. `website-sitemap.jsonl` holds sitemap-only and newly
 discovered content types without duplicating the known REST-backed sitemap groups.
+
+`atlas-taxonomies.json` is written to the raw layer only. It is reference data
+that enriches public posts during cleaning, not a set of documents.
+
+Each cleaned JSONL line is guaranteed to occupy exactly one line: the writer
+escapes the Unicode line separators U+2028, U+2029, and U+0085, which `json.dumps`
+otherwise emits literally and which would split one document across two lines for
+any Unicode-aware line reader. The parsed value is unchanged.
 
 ## EC2 deployment
 

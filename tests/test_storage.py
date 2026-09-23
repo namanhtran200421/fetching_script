@@ -8,6 +8,7 @@ from botocore.exceptions import ClientError
 from app.storage.local_storage import LocalStorage
 from app.storage.naming import source_file_stem
 from app.storage.s3_storage import S3Storage
+from app.storage.serialization import json_line
 
 
 class FakeS3:
@@ -192,6 +193,43 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(upload["ContentType"], "text/plain; charset=utf-8")
         self.assertEqual(upload["Body"], b"complete log\n")
         self.assertEqual(upload["ServerSideEncryption"], "AES256")
+
+
+class JsonLineTests(unittest.TestCase):
+    """One cleaned document must always occupy exactly one output line."""
+
+    separators = "\u2028\u2029\u0085"
+
+    def test_unicode_line_breaks_are_escaped(self):
+        row = {"content_html": f"<p>a{self.separators}b</p>"}
+
+        line = json_line(row)
+
+        self.assertEqual(len(line.splitlines()), 1)
+        self.assertEqual(len(line.split("\n")), 1)
+        # Escaping is a serialization detail: the parsed value is unchanged.
+        self.assertEqual(json.loads(line), row)
+
+    def test_ordinary_unicode_is_still_written_unescaped(self):
+        line = json_line({"title": "Cultural Infusion – Atlas ’26"})
+
+        self.assertIn("Cultural Infusion – Atlas ’26", line)
+
+    def test_written_jsonl_file_is_one_line_per_document(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage = LocalStorage(Path(temp_dir) / "raw")
+            documents = [
+                {"document_id": "a", "content_html": f"x{self.separators}y"},
+                {"document_id": "b", "content_html": "plain"},
+            ]
+
+            path = storage.save_cleaned_source("run", "atlas_posts", documents)
+
+            raw = Path(path).read_text(encoding="utf-8")
+            self.assertEqual(len(raw.splitlines()), 2)
+            self.assertEqual(
+                [json.loads(line) for line in raw.splitlines()], documents
+            )
 
 
 if __name__ == "__main__":

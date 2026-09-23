@@ -12,9 +12,51 @@ from app.cleaning.normalizers import (
     normalize_wordpress_record,
 )
 from app.cleaning.pipeline import CleaningPipeline
-from app.ingestion.source_registry import WORDPRESS_SOURCES
+from app.ingestion.source_registry import (
+    DOCUMENT_SOURCES,
+    SOURCES,
+    WORDPRESS_SOURCES,
+)
 from app.storage.local_storage import LocalStorage
 from app.storage.naming import source_file_stem
+
+
+VALID_WORDPRESS_RECORD = {
+    "id": 1,
+    "title": {"rendered": "Example &amp; title"},
+    "content": {
+        "rendered": "<p>Useful retrieval content.</p>",
+        "protected": False,
+    },
+    "modified_gmt": "2026-01-01T00:00:00",
+    "link": "https://example.test/document",
+}
+VALID_MEDIA_RECORD = {
+    "id": 1,
+    "title": {"rendered": "Example &amp; title"},
+    "mime_type": "application/pdf",
+    "source_url": "https://example.test/report.pdf",
+    "link": "https://example.test/report/",
+    "modified_gmt": "2026-01-01T00:00:00",
+    "content_text": "Useful retrieval content.",
+    "page_count": 3,
+}
+VALID_TAXONOMY_RECORD = {
+    "id": 175,
+    "name": "Events",
+    "slug": "events",
+    "taxonomy": "category",
+}
+
+
+def sample_record_for(source_name):
+    """Return a raw record shaped for this source's acquisition method."""
+    method = SOURCES[source_name]["acquisition_method"]
+    if method == "media_files":
+        return dict(VALID_MEDIA_RECORD)
+    if method == "taxonomy":
+        return dict(VALID_TAXONOMY_RECORD)
+    return dict(VALID_WORDPRESS_RECORD)
 
 
 class CleaningTests(unittest.TestCase):
@@ -145,18 +187,8 @@ class CleaningTests(unittest.TestCase):
             run_id = "test_run"
             storage.save_manifest(run_id, {"status": "complete"})
 
-            valid_record = {
-                "id": 1,
-                "title": {"rendered": "Example &amp; title"},
-                "content": {
-                    "rendered": "<p>Useful retrieval content.</p>",
-                    "protected": False,
-                },
-                "modified_gmt": "2026-01-01T00:00:00",
-                "link": "https://example.test/document",
-            }
             for source_name in WORDPRESS_SOURCES:
-                records = [dict(valid_record)]
+                records = [sample_record_for(source_name)]
                 if source_name == "research":
                     records.extend([
                         {"id": None, "title": {}, "content": {}},
@@ -225,7 +257,7 @@ class CleaningTests(unittest.TestCase):
             self.assertEqual(len(quarantined), 2)
             self.assertFalse((Path(temp_dir) / "rag" / run_id).exists())
 
-            for source_name in WORDPRESS_SOURCES:
+            for source_name in DOCUMENT_SOURCES:
                 source_path = (
                     Path(temp_dir)
                     / "cleaned"
@@ -237,11 +269,87 @@ class CleaningTests(unittest.TestCase):
                 self.assertTrue(source_document["content_text"])
                 self.assertTrue(source_document["content_markdown"])
 
+            # Reference sources are fetched and stored, but never cleaned
+            # into documents.
+            self.assertNotIn("atlas_taxonomies", manifest["source_counts"])
+            self.assertEqual(
+                manifest["reference_sources"], ["atlas_taxonomies"]
+            )
+
             latest = json.loads(
                 (Path(temp_dir) / "cleaned" / "latest.json").read_text()
             )
             self.assertEqual(latest["status"], "complete_with_errors")
             self.assertFalse(manifest["quality_gate_passed"])
+
+    def test_unicode_line_separators_never_split_a_jsonl_record(self):
+        # U+2028 and friends are line breaks to a Unicode-aware reader but
+        # are not escaped by json.dumps, so one document would otherwise
+        # occupy two lines of the output file.
+        document = normalize_wordpress_record(
+            {
+                "id": 1,
+                "title": {"rendered": "Title"},
+                "content": {
+                    "rendered": "<p>First\u2028second\u2029third\u0085fourth</p>"
+                },
+                "link": "https://atlas.example.test/one/",
+            },
+            "atlas_posts",
+            SOURCES["atlas_posts"],
+            "run-1",
+        )
+
+        for field in ("content_markdown", "content_text", "title"):
+            with self.subTest(field=field):
+                self.assertEqual(
+                    len(document[field].splitlines()),
+                    len(document[field].split("\n")),
+                )
+
+    def test_taxonomy_terms_resolve_to_names_on_public_posts(self):
+        document = normalize_wordpress_record(
+            {
+                "id": 66020,
+                "title": {"rendered": "Cultural Data Infrastructure"},
+                "content": {"rendered": "<p>Body.</p>"},
+                "link": "https://atlas.example.test/cultural-data/",
+                "categories": [175, 9],
+                "tags": [663, 4040],
+            },
+            "atlas_posts",
+            SOURCES["atlas_posts"],
+            "run-1",
+            taxonomy_terms={
+                "category": {
+                    175: {"id": 175, "name": "Events"},
+                    9: {"id": 9, "name": "Insights"},
+                },
+                "post_tag": {663: {"id": 663, "name": "Research"}},
+            },
+        )
+
+        self.assertEqual(
+            document["metadata"]["category_names"], ["Events", "Insights"]
+        )
+        # An ID with no matching term is dropped rather than guessed at.
+        self.assertEqual(document["metadata"]["tag_names"], ["Research"])
+
+    def test_records_without_taxonomy_terms_are_unchanged(self):
+        document = normalize_wordpress_record(
+            {
+                "id": 1,
+                "title": {"rendered": "Title"},
+                "content": {"rendered": "<p>Body.</p>"},
+                "link": "https://atlas.example.test/one/",
+                "categories": [175],
+            },
+            "atlas_posts",
+            SOURCES["atlas_posts"],
+            "run-1",
+        )
+
+        self.assertNotIn("category_names", document["metadata"])
 
     def test_pipeline_accepts_complete_legacy_manifest(self):
         with tempfile.TemporaryDirectory() as temp_dir:

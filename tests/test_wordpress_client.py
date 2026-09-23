@@ -106,5 +106,78 @@ class WordPressClientTests(unittest.TestCase):
         self.assertEqual(params["order"], "asc")
 
 
+class UnauthenticatedClientTests(unittest.TestCase):
+    """A public origin must be fetched without any credential at all."""
+
+    def test_client_without_credentials_sends_no_auth(self):
+        sync_client = SyncFirstPageClient(FakeResponse([{"id": 1}]))
+        client = WordPressClient(
+            "https://atlas.example.test",
+            http_client=sync_client,
+        )
+
+        client.get_all("posts", "id")
+
+        self.assertIsNone(client.auth)
+        self.assertIsNone(sync_client.calls[0][1]["auth"])
+
+    def test_half_a_credential_pair_never_authenticates(self):
+        # A misconfigured environment must not send an empty password
+        # alongside a real username.
+        for username, password in (("user", None), (None, "password"), ("", "")):
+            with self.subTest(username=username, password=password):
+                client = WordPressClient(
+                    "https://atlas.example.test", username, password
+                )
+                self.assertIsNone(client.auth)
+
+    def test_extra_params_reach_every_page_of_a_collection(self):
+        sync_client = SyncFirstPageClient(
+            FakeResponse([{"id": 1}], total_pages=2)
+        )
+        async_client = AsyncPageClient({2: [{"id": 2}]})
+        client = WordPressClient(
+            "https://atlas.example.test",
+            http_client=sync_client,
+            async_concurrency=2,
+            async_http_client_factory=(
+                lambda **kwargs: AsyncClientContext(async_client)
+            ),
+        )
+
+        client.get_all(
+            "media", "id", extra_params={"mime_type": "application/pdf"}
+        )
+
+        self.assertEqual(
+            sync_client.calls[0][1]["params"]["mime_type"], "application/pdf"
+        )
+        self.assertEqual(
+            async_client.calls[0][1]["params"]["mime_type"], "application/pdf"
+        )
+
+    def test_get_terms_paginates_without_a_post_status(self):
+        sync_client = SyncFirstPageClient(
+            FakeResponse([{"id": 1, "name": "Insights"}], total_pages=2)
+        )
+        async_client = AsyncPageClient({2: [{"id": 2, "name": "News"}]})
+        client = WordPressClient(
+            "https://atlas.example.test",
+            http_client=sync_client,
+            async_concurrency=2,
+            async_http_client_factory=(
+                lambda **kwargs: AsyncClientContext(async_client)
+            ),
+        )
+
+        terms = client.get_terms("categories", fields="id,name")
+
+        self.assertEqual([term["id"] for term in terms], [1, 2])
+        params = sync_client.calls[0][1]["params"]
+        self.assertNotIn("status", params)
+        self.assertEqual(params["hide_empty"], "false")
+        self.assertEqual(params["_fields"], "id,name")
+
+
 if __name__ == "__main__":
     unittest.main()

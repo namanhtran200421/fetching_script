@@ -8,8 +8,8 @@ class WordPressClient:
     def __init__(
         self,
         base_url: str,
-        username: str,
-        application_password: str,
+        username: str = None,
+        application_password: str = None,
         http_client=None,
         async_concurrency=6,
         timeout=50,
@@ -18,7 +18,14 @@ class WordPressClient:
         async_http_client_factory=AsyncRetryingHttpClient,
     ):
         self.base_url = base_url.rstrip("/")
-        self.auth = (username, application_password)
+        # Public origins are fetched anonymously. Never build a partial
+        # credential pair: a missing half must disable authentication
+        # entirely rather than send an empty username or password.
+        self.auth = (
+            (username, application_password)
+            if username and application_password
+            else None
+        )
         self.http_client = http_client or RetryingHttpClient()
         self.async_concurrency = async_concurrency
         self.timeout = timeout
@@ -33,6 +40,7 @@ class WordPressClient:
         fields=None,
         include=None,
         modified_after=None,
+        extra_params=None,
     ):
         params = {
             "status": "publish",
@@ -49,6 +57,8 @@ class WordPressClient:
                 "orderby": "modified",
                 "order": "asc",
             })
+        if extra_params:
+            params.update(extra_params)
         return params
 
     def get_page(
@@ -59,6 +69,7 @@ class WordPressClient:
         per_page: int = 100,
         include=None,
         modified_after=None,
+        extra_params=None,
     ):
         params = self._collection_params(
             page,
@@ -66,6 +77,7 @@ class WordPressClient:
             fields=fields,
             include=include,
             modified_after=modified_after,
+            extra_params=extra_params,
         )
 
         response = self.http_client.get(
@@ -116,6 +128,7 @@ class WordPressClient:
         fields: str,
         include=None,
         modified_after=None,
+        extra_params=None,
     ):
         if include is not None and not include:
             return []
@@ -126,6 +139,7 @@ class WordPressClient:
             fields,
             include=include,
             modified_after=modified_after,
+            extra_params=extra_params,
         )
         all_items = first_response.json()
         if not isinstance(all_items, list):
@@ -139,6 +153,7 @@ class WordPressClient:
                 fields=fields,
                 include=include,
                 modified_after=modified_after,
+                extra_params=extra_params,
             )
             for page in range(2, total_pages + 1)
         ]
@@ -146,6 +161,38 @@ class WordPressClient:
             all_items.extend(payload)
 
         return all_items
+
+    @staticmethod
+    def _term_params(page, per_page, fields=None):
+        # Term endpoints have no post status, so they do not take the
+        # "status" parameter that _collection_params sends.
+        params = {"page": page, "per_page": per_page, "hide_empty": "false"}
+        if fields:
+            params["_fields"] = fields
+        return params
+
+    def get_terms(self, taxonomy_endpoint: str, fields: str = None):
+        """Return every term in a taxonomy, including unused ones."""
+        url = f"{self.base_url}/wp-json/wp/v2/{taxonomy_endpoint}"
+        first_response = self.http_client.get(
+            url,
+            auth=self.auth,
+            params=self._term_params(1, 100, fields=fields),
+        )
+        first_response.raise_for_status()
+        terms = first_response.json()
+        if not isinstance(terms, list):
+            raise ValueError("WordPress taxonomy response must be a list")
+
+        total_pages = int(first_response.headers.get("X-WP-TotalPages", "1"))
+        page_params = [
+            self._term_params(page, 100, fields=fields)
+            for page in range(2, total_pages + 1)
+        ]
+        for payload in self._remaining_pages(taxonomy_endpoint, page_params):
+            terms.extend(payload)
+
+        return terms
 
     def search_all(
         self, subtype: str, per_page: int = 100, max_results: int = 5000

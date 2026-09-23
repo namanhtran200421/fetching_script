@@ -1,4 +1,14 @@
-SOURCES = {
+from typing import Any, Dict
+
+from app.config import ATLAS_PUBLIC_BASE_URL
+
+# Every source on this origin is public and unauthenticated. Sharing one base
+# URL keeps them on a single crawler and a single WordPress client per run, so
+# they also share one robots policy, one request-rate budget, and one cached
+# sitemap index. Each must therefore agree on sitemap_path.
+ATLAS_PUBLIC_SITEMAP_PATH = "/sitemap_index.xml"
+
+SOURCES: Dict[str, Dict[str, Any]] = {
     "research": {
         "acquisition_method": "rest",
         "endpoint": "academic_paper",
@@ -109,10 +119,10 @@ SOURCES = {
     # unauthenticated crawler and never forwards WordPress credentials.
     "faq": {
         "acquisition_method": "html",
-        "base_url": "https://atlas.culturalinfusion.com",
+        "base_url": ATLAS_PUBLIC_BASE_URL,
         "start_path": "/faq/",
         "allowed_path_prefix": "/faq/",
-        "sitemap_path": "/sitemap_index.xml",
+        "sitemap_path": ATLAS_PUBLIC_SITEMAP_PATH,
         "sitemap_include": ("page-sitemap.xml",),
         "ingest_start_page": True,
         "follow_page_links": False,
@@ -178,7 +188,144 @@ SOURCES = {
         "fields": (
             "id,title,content,modified,modified_gmt,link,mec_category"
         )
-    }
+    },
+
+    # ------------------------------------------------------------------
+    # Public Atlas website. Everything below is served without credentials
+    # and is safe to quote to non-members, so it carries access_class
+    # "public". The public site's own mec-events are deliberately absent:
+    # they are teaser stubs that end in a register-to-read-more link, and
+    # the full event text is already ingested as mec_event_definitions.
+    # ------------------------------------------------------------------
+
+    "atlas_posts": {
+        "acquisition_method": "rest",
+        "base_url": ATLAS_PUBLIC_BASE_URL,
+        "endpoint": "posts",
+        "html_fallback": True,
+        # Posts live at the site root, so the sitemap and search subtype,
+        # not the path prefix, are what scope this source.
+        "allowed_path_prefix": "/",
+        "sitemap_path": ATLAS_PUBLIC_SITEMAP_PATH,
+        "sitemap_include": ("post-sitemap.xml",),
+        "discovery_path": "/wp-json/wp/v2/search",
+        "discovery_subtype": "post",
+        "follow_page_links": False,
+        "allow_body_fallback": True,
+        "article_selectors": (
+            ".entry-content.content", ".entry-content", "#main-content",
+        ),
+        "minimum_content_characters": 30,
+        "content_type": "public_article",
+        "access_class": "public",
+        "supports_modified_after": True,
+        "taxonomy_fields": {
+            "categories": "category",
+            "tags": "post_tag",
+        },
+        "fields": (
+            "id,title,content,excerpt,modified,modified_gmt,date_gmt,link,"
+            "categories,tags"
+        ),
+    },
+
+    "atlas_pages": {
+        "acquisition_method": "rest",
+        "base_url": ATLAS_PUBLIC_BASE_URL,
+        "endpoint": "pages",
+        "html_fallback": True,
+        "allowed_path_prefix": "/",
+        "sitemap_path": ATLAS_PUBLIC_SITEMAP_PATH,
+        "sitemap_include": ("page-sitemap.xml",),
+        "discovery_path": "/wp-json/wp/v2/search",
+        "discovery_subtype": "page",
+        "follow_page_links": False,
+        "allow_body_fallback": True,
+        "article_selectors": (
+            ".entry-content.content", ".entry-content", "#main-content",
+        ),
+        "minimum_content_characters": 30,
+        "content_type": "public_page",
+        "access_class": "public",
+        "supports_modified_after": True,
+        # Placeholders, sign-in and error pages, empty quiz shells, and the
+        # FAQ page that the dedicated faq source already ingests in full.
+        "denylist_setting": "ATLAS_PAGE_DENYLIST",
+        "fields": (
+            "id,title,content,modified,modified_gmt,date_gmt,link"
+        ),
+    },
+
+    "atlas_case_studies": {
+        "acquisition_method": "rest",
+        "base_url": ATLAS_PUBLIC_BASE_URL,
+        "endpoint": "case-study",
+        "html_fallback": True,
+        "allowed_path_prefix": "/case-study/",
+        # Case studies are absent from the sitemap, so the HTML fallback
+        # relies on WordPress search discovery alone.
+        "sitemap_path": ATLAS_PUBLIC_SITEMAP_PATH,
+        "discovery_path": "/wp-json/wp/v2/search",
+        "discovery_subtype": "case-study",
+        "follow_page_links": False,
+        "allow_body_fallback": True,
+        "article_selectors": (
+            ".entry-content.content", ".entry-content", "#main-content",
+        ),
+        "minimum_content_characters": 30,
+        "content_type": "public_case_study",
+        "access_class": "public",
+        "supports_modified_after": True,
+        "fields": (
+            "id,title,content,modified,modified_gmt,date_gmt,link"
+        ),
+    },
+
+    "atlas_media_documents": {
+        "acquisition_method": "media_files",
+        "base_url": ATLAS_PUBLIC_BASE_URL,
+        "endpoint": "media",
+        "content_type": "public_document",
+        "access_class": "public",
+        "supports_modified_after": True,
+        "fields": (
+            "id,title,link,source_url,mime_type,date_gmt,modified,"
+            "modified_gmt,caption,alt_text,media_details"
+        ),
+    },
+
+    # Reference data, not documents: term dictionaries used to resolve the
+    # numeric taxonomy IDs on public posts into human-readable names.
+    "atlas_taxonomies": {
+        "acquisition_method": "taxonomy",
+        "base_url": ATLAS_PUBLIC_BASE_URL,
+        "role": "reference",
+        "taxonomies": {
+            "category": "categories",
+            "post_tag": "tags",
+            "mec_category": "mec_category",
+        },
+        "content_type": "public_taxonomy_term",
+        "access_class": "public",
+        "fields": "id,name,slug,description,count,taxonomy,parent,link",
+    },
+}
+
+
+def is_reference_source(config):
+    """Reference sources are fetched and stored, but never become documents."""
+    return config.get("role") == "reference"
+
+
+DOCUMENT_SOURCES = {
+    name: config
+    for name, config in SOURCES.items()
+    if not is_reference_source(config)
+}
+REFERENCE_SOURCES = {
+    name: config
+    for name, config in SOURCES.items()
+    if is_reference_source(config)
 }
 
 # Keep transport selection declarative and keep the old public name available to

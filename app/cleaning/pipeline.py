@@ -4,15 +4,40 @@ from datetime import datetime, timezone
 from app.cleaning.normalizers import (
     SCHEMA_VERSION,
     normalize_calendar_event,
+    normalize_media_document,
     normalize_membership_plan,
     normalize_wordpress_record,
 )
 from app.cleaning.validators import validate_document
-from app.ingestion.source_registry import SOURCES
+from app.ingestion.source_registry import (
+    REFERENCE_SOURCES,
+    SOURCES,
+    is_reference_source,
+)
 
 
 LOGGER = logging.getLogger(__name__)
-CLEANING_VERSION = "2.1"
+CLEANING_VERSION = "2.2"
+
+# Most sources are WordPress records. Anything acquired differently declares
+# its own normalizer here rather than branching inside the cleaning loop.
+NORMALIZERS = {
+    "media_files": normalize_media_document,
+}
+
+
+def build_taxonomy_terms(records):
+    """Index fetched taxonomy terms as {taxonomy: {term_id: term}}."""
+    terms: dict = {}
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        taxonomy = record.get("taxonomy")
+        term_id = record.get("id")
+        if not taxonomy or term_id is None:
+            continue
+        terms.setdefault(taxonomy, {})[term_id] = record
+    return terms
 
 
 class CleaningPipeline:
@@ -52,6 +77,10 @@ class CleaningPipeline:
         )
 
         try:
+            taxonomy_terms = self._load_reference_terms(
+                run_id, manifest_source_counts if manifest_has_inventory else None
+            )
+
             for source_name, source_config in SOURCES.items():
                 if (
                     manifest_has_inventory
@@ -65,15 +94,26 @@ class CleaningPipeline:
                         source_name,
                     )
                     continue
+                if is_reference_source(source_config):
+                    # Reference data enriches documents; it is not one itself.
+                    continue
                 LOGGER.info("Cleaning source %s", source_name)
                 raw_records = self.storage.load_source(run_id, source_name)
                 if not isinstance(raw_records, list):
                     raise ValueError(f"Raw source {source_name} must be a list")
 
+                normalizer = NORMALIZERS.get(
+                    source_config["acquisition_method"],
+                    normalize_wordpress_record,
+                )
                 documents, normalization_failures = self._normalize_records(
                     enumerate(raw_records),
-                    lambda _, record: normalize_wordpress_record(
-                        record, source_name, source_config, run_id
+                    lambda _, record, normalizer=normalizer: normalizer(
+                        record,
+                        source_name,
+                        source_config,
+                        run_id,
+                        taxonomy_terms=taxonomy_terms,
                     ),
                 )
                 self._write_source(
@@ -127,6 +167,11 @@ class CleaningPipeline:
                 "output_format": "application/x-ndjson",
                 "cleaned_outputs": cleaned_outputs,
                 "unavailable_sources": unavailable_sources,
+                "reference_sources": sorted(REFERENCE_SOURCES),
+                "taxonomy_terms_loaded": {
+                    taxonomy: len(table)
+                    for taxonomy, table in sorted(taxonomy_terms.items())
+                },
                 "quality_gate_passed": status == "complete",
                 "published_latest": True,
             }
@@ -164,6 +209,30 @@ class CleaningPipeline:
             except Exception:
                 LOGGER.exception("Could not save cleaning failure manifest")
             raise
+
+    def _load_reference_terms(self, run_id, manifest_source_counts):
+        """Load taxonomy tables used to resolve term IDs on documents."""
+        records = []
+        for source_name in REFERENCE_SOURCES:
+            if (
+                manifest_source_counts is not None
+                and source_name not in manifest_source_counts
+            ):
+                continue
+            try:
+                loaded = self.storage.load_source(run_id, source_name)
+            except Exception as error:
+                # Enrichment is optional. Losing it must not fail the run.
+                LOGGER.warning(
+                    "Could not load reference source %s; continuing without "
+                    "taxonomy names: %s",
+                    source_name,
+                    error,
+                )
+                continue
+            if isinstance(loaded, list):
+                records.extend(loaded)
+        return build_taxonomy_terms(records)
 
     def _write_source(
         self,

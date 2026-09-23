@@ -1,4 +1,5 @@
 import logging
+from urllib.parse import urlsplit
 
 from app.ingestion.source_registry import SOURCES
 
@@ -6,23 +7,74 @@ from app.ingestion.source_registry import SOURCES
 LOGGER = logging.getLogger(__name__)
 
 
+def record_slug(record):
+    """Return the trailing URL slug of a WordPress record, or None."""
+    if not isinstance(record, dict):
+        return None
+    link = record.get("link") or record.get("canonical_url")
+    if not isinstance(link, str) or not link.strip():
+        return None
+    path = urlsplit(link.strip()).path.strip("/")
+    if not path:
+        return ""
+    return path.rsplit("/", 1)[-1].lower()
+
+
 class IngestionFetcher:
 
     def __init__(
         self, wordpress_client, mec_client, html_crawler=None,
         html_crawlers=None, wordpress_page_allowlist=(),
-        max_calendar_events=None,
+        max_calendar_events=None, wordpress_clients=None,
+        media_clients=None, slug_denylists=None,
     ):
         self.wordpress_client = wordpress_client
         self.mec_client = mec_client
         self.html_crawler = html_crawler
         self.html_crawlers = dict(html_crawlers or {})
+        # Per-source clients are a credential boundary, not an optimisation:
+        # a public source must resolve to its own unauthenticated client so
+        # the membership application password can never reach that origin.
+        self.wordpress_clients = dict(wordpress_clients or {})
+        self.media_clients = dict(media_clients or {})
+        self.slug_denylists = dict(slug_denylists or {})
         self.wordpress_page_allowlist = wordpress_page_allowlist
         self.max_calendar_events = max_calendar_events
         self.source_summaries = {}
 
     def _html_crawler_for(self, source_name):
         return self.html_crawlers.get(source_name, self.html_crawler)
+
+    def _wordpress_client_for(self, source_name):
+        return self.wordpress_clients.get(source_name, self.wordpress_client)
+
+    def _denylist_for(self, source_name, source):
+        setting = source.get("denylist_setting")
+        if not setting:
+            return ()
+        return tuple(self.slug_denylists.get(setting, ()))
+
+    def _apply_denylist(self, source_name, source, records, summary):
+        """Drop known non-content pages and report them as skipped."""
+        denylist = self._denylist_for(source_name, source)
+        if not denylist or not records:
+            return records
+        blocked = set(denylist)
+        kept = [
+            record for record in records
+            if record_slug(record) not in blocked
+        ]
+        removed = len(records) - len(kept)
+        if removed:
+            summary["accepted"] = len(kept)
+            summary["skipped"] = summary.get("skipped", 0) + removed
+            LOGGER.info(
+                "Excluded %d %s record(s) listed in %s",
+                removed,
+                source_name,
+                source["denylist_setting"],
+            )
+        return kept
 
     def _fetch_html_fallback(
         self,
@@ -61,6 +113,7 @@ class IngestionFetcher:
             records = [record for record in records if record.get("id") in approved]
             summary["accepted"] = len(records)
             summary["skipped"] += original_count - len(records)
+        records = self._apply_denylist(source_name, source, records, summary)
         self.source_summaries[source_name] = summary
         return records
 
@@ -116,7 +169,7 @@ class IngestionFetcher:
 
     def _fetch_mec_events(self, source_name, source):
         try:
-            inventory = self.wordpress_client.search_all(
+            inventory = self._wordpress_client_for(source_name).search_all(
                 source["discovery_subtype"]
             )
             selected_inventory = (
@@ -192,6 +245,7 @@ class IngestionFetcher:
             raise ValueError(f"Unknown source: {source_name}")
 
         if source["acquisition_method"] == "rest":
+            wordpress_client = self._wordpress_client_for(source_name)
             include = (
                 self.wordpress_page_allowlist or None
                 if source.get("allowlist_setting") == "WORDPRESS_PAGE_ALLOWLIST"
@@ -214,7 +268,7 @@ class IngestionFetcher:
                                 record for record in previous_records
                                 if record.get("id") in approved
                             ]
-                        changed_records = self.wordpress_client.get_all(
+                        changed_records = wordpress_client.get_all(
                             endpoint=source["endpoint"],
                             fields=source["fields"],
                             include=include,
@@ -232,7 +286,7 @@ class IngestionFetcher:
                             source_name,
                             error,
                         )
-                        records = self.wordpress_client.get_all(
+                        records = wordpress_client.get_all(
                             endpoint=source["endpoint"],
                             fields=source["fields"],
                             include=include,
@@ -240,7 +294,7 @@ class IngestionFetcher:
                         changed_records = records
                         use_delta = False
                 else:
-                    records = self.wordpress_client.get_all(
+                    records = wordpress_client.get_all(
                         endpoint=source["endpoint"],
                         fields=source["fields"],
                         include=include,
@@ -273,6 +327,9 @@ class IngestionFetcher:
                     "type": type(delta_fallback_error).__name__,
                     "message": str(delta_fallback_error),
                 }
+            records = self._apply_denylist(
+                source_name, source, records, summary
+            )
             self.source_summaries[source_name] = summary
             return records
         if source["acquisition_method"] == "html":
@@ -290,10 +347,128 @@ class IngestionFetcher:
             return records
         if source["acquisition_method"] == "mec_api":
             return self._fetch_mec_events(source_name, source)
+        if source["acquisition_method"] == "media_files":
+            return self._fetch_media_documents(
+                source_name,
+                source,
+                previous_records=previous_records,
+                modified_after=modified_after,
+                incremental=incremental,
+            )
+        if source["acquisition_method"] == "taxonomy":
+            return self._fetch_taxonomy_terms(source_name, source)
         raise ValueError(
             f"Unsupported acquisition method for {source_name}: "
             f"{source['acquisition_method']}"
         )
+
+    def _fetch_media_documents(
+        self,
+        source_name,
+        source,
+        previous_records=None,
+        modified_after=None,
+        incremental=False,
+    ):
+        media_client = self.media_clients.get(source_name)
+        if media_client is None:
+            raise RuntimeError(
+                f"No media client is configured for {source_name}"
+            )
+
+        use_delta = bool(
+            incremental
+            and previous_records is not None
+            and modified_after
+            and source.get("supports_modified_after")
+        )
+        # Listing is cheap; downloading and parsing is not. An incremental run
+        # therefore lists everything, then reads only the attachments whose
+        # stored text is missing or stale.
+        attachments = media_client.list_documents(fields=source.get("fields"))
+        reusable = {}
+        if use_delta:
+            for previous in previous_records or []:
+                if isinstance(previous, dict) and previous.get("id"):
+                    reusable[previous["id"]] = previous
+
+        pending = []
+        reused_records = []
+        for attachment in attachments:
+            previous = reusable.get(attachment.get("id"))
+            if (
+                previous is not None
+                and previous.get("content_text")
+                and previous.get("modified_gmt") == attachment.get("modified_gmt")
+            ):
+                reused_records.append({**previous, **{
+                    key: value for key, value in attachment.items()
+                    if key != "content_text"
+                }})
+            else:
+                pending.append(attachment)
+
+        result = media_client.read_documents(pending)
+        if not isinstance(result, dict):
+            raise ValueError("Media read result must be an object")
+        documents = result.get("documents", [])
+        if not isinstance(documents, list):
+            raise ValueError("Media documents must be a list")
+        failures = result.get("failures", [])
+        failures = list(failures) if isinstance(failures, list) else []
+
+        records = [*reused_records, *documents]
+        self.source_summaries[source_name] = {
+            "discovered": len(attachments),
+            "fetched": len(pending),
+            "accepted": len(records),
+            "skipped": 0,
+            "failed": len(failures),
+            "limit_reached": False,
+            "acquisition_method": "media_files",
+            "incremental": use_delta,
+            "changed": len(documents),
+            "reused": len(reused_records),
+            "failure_details": failures[:100],
+            "failure_details_truncated": len(failures) > 100,
+        }
+        return records
+
+    def _fetch_taxonomy_terms(self, source_name, source):
+        """Fetch term dictionaries used to resolve taxonomy IDs to names."""
+        wordpress_client = self._wordpress_client_for(source_name)
+        records = []
+        failures = []
+        for taxonomy, endpoint in source["taxonomies"].items():
+            try:
+                terms = wordpress_client.get_terms(
+                    endpoint, fields=source.get("fields")
+                )
+            except Exception as error:
+                # One missing taxonomy must not discard the others.
+                failures.append({
+                    "taxonomy": taxonomy,
+                    "error": f"{type(error).__name__}: {error}",
+                })
+                LOGGER.warning(
+                    "Could not fetch the %s taxonomy: %s", taxonomy, error
+                )
+                continue
+            for term in terms:
+                if isinstance(term, dict) and term.get("id") is not None:
+                    records.append({**term, "taxonomy": taxonomy})
+
+        self.source_summaries[source_name] = {
+            "discovered": len(records),
+            "fetched": len(records),
+            "accepted": len(records),
+            "skipped": 0,
+            "failed": len(failures),
+            "limit_reached": False,
+            "acquisition_method": "taxonomy",
+            "failure_details": failures,
+        }
+        return records
 
     def fetch_all_sources(self):
         return {

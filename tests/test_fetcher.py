@@ -162,5 +162,213 @@ class FetcherTests(unittest.TestCase):
         self.assertEqual([item["event_id"] for item in result["events"]], [1])
 
 
+class PublicAtlasSourceTests(unittest.TestCase):
+    """The public site must never be fetched with membership credentials."""
+
+    def test_public_rest_source_uses_its_own_unauthenticated_client(self):
+        class PublicWordPressClient(WordPressClient):
+            def get_all(self, **kwargs):
+                self.calls.append(kwargs)
+                return [{"id": 9, "link": "https://atlas.test/insight/"}]
+
+        membership = WordPressClient()
+        public = PublicWordPressClient()
+        fetcher = IngestionFetcher(
+            membership,
+            MecClient(),
+            wordpress_clients={"atlas_posts": public},
+        )
+
+        records = fetcher.fetch_source("atlas_posts")
+
+        self.assertEqual(records, [{"id": 9, "link": "https://atlas.test/insight/"}])
+        self.assertEqual(len(public.calls), 1)
+        self.assertEqual(membership.calls, [])
+
+    def test_membership_sources_keep_using_the_default_client(self):
+        membership = WordPressClient()
+        public = WordPressClient()
+        fetcher = IngestionFetcher(
+            membership,
+            MecClient(),
+            wordpress_clients={"atlas_posts": public},
+        )
+
+        fetcher.fetch_source("research")
+
+        self.assertEqual(len(membership.calls), 1)
+        self.assertEqual(public.calls, [])
+
+    def test_denylisted_page_slugs_are_excluded_and_counted_as_skipped(self):
+        class PageClient(WordPressClient):
+            def get_all(self, **kwargs):
+                self.calls.append(kwargs)
+                return [
+                    {"id": 1, "link": "https://atlas.test/about/"},
+                    {"id": 2, "link": "https://atlas.test/faq/"},
+                    {"id": 3, "link": "https://atlas.test/security-quiz/"},
+                ]
+
+        fetcher = IngestionFetcher(
+            WordPressClient(),
+            MecClient(),
+            wordpress_clients={"atlas_pages": PageClient()},
+            slug_denylists={"ATLAS_PAGE_DENYLIST": ("faq", "security-quiz")},
+        )
+
+        records = fetcher.fetch_source("atlas_pages")
+
+        self.assertEqual([record["id"] for record in records], [1])
+        summary = fetcher.source_summaries["atlas_pages"]
+        self.assertEqual(summary["accepted"], 1)
+        self.assertEqual(summary["skipped"], 2)
+
+    def test_denylist_also_filters_the_html_fallback_path(self):
+        class BrokenClient(WordPressClient):
+            def get_all(self, **kwargs):
+                raise RuntimeError("REST unavailable")
+
+        class FallbackCrawler:
+            def crawl(self, source_name, source, **kwargs):
+                return [
+                    {"id": 1, "link": "https://atlas.test/about/"},
+                    {"id": 2, "link": "https://atlas.test/faq/"},
+                ], {"accepted": 2, "skipped": 0, "failed": 0}
+
+        fetcher = IngestionFetcher(
+            WordPressClient(),
+            MecClient(),
+            wordpress_clients={"atlas_pages": BrokenClient()},
+            html_crawlers={"atlas_pages": FallbackCrawler()},
+            slug_denylists={"ATLAS_PAGE_DENYLIST": ("faq",)},
+        )
+
+        records = fetcher.fetch_source("atlas_pages")
+
+        self.assertEqual([record["id"] for record in records], [1])
+        self.assertEqual(fetcher.source_summaries["atlas_pages"]["skipped"], 1)
+
+    def test_taxonomy_source_tags_each_term_and_survives_one_failure(self):
+        class TermClient:
+            def get_terms(self, taxonomy_endpoint, fields=None):
+                if taxonomy_endpoint == "tags":
+                    raise RuntimeError("taxonomy unavailable")
+                return [{"id": 1, "name": taxonomy_endpoint.title()}]
+
+        fetcher = IngestionFetcher(
+            WordPressClient(),
+            MecClient(),
+            wordpress_clients={"atlas_taxonomies": TermClient()},
+        )
+
+        records = fetcher.fetch_source("atlas_taxonomies")
+
+        self.assertEqual(
+            sorted(record["taxonomy"] for record in records),
+            ["category", "mec_category"],
+        )
+        summary = fetcher.source_summaries["atlas_taxonomies"]
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["failure_details"][0]["taxonomy"], "post_tag")
+
+
+class MediaSourceTests(unittest.TestCase):
+    class RecordingMediaClient:
+        def __init__(self, attachments, failures=()):
+            self.attachments = attachments
+            self.failures = list(failures)
+            self.read_calls = []
+
+        def list_documents(self, fields=None, modified_after=None):
+            return list(self.attachments)
+
+        def read_documents(self, attachments):
+            self.read_calls.append([item["id"] for item in attachments])
+            return {
+                "documents": [
+                    {**item, "content_text": f"text for {item['id']}"}
+                    for item in attachments
+                ],
+                "failures": self.failures,
+            }
+
+    def _fetcher(self, media_client):
+        return IngestionFetcher(
+            WordPressClient(),
+            MecClient(),
+            media_clients={"atlas_media_documents": media_client},
+        )
+
+    def test_full_run_reads_every_attachment(self):
+        media = self.RecordingMediaClient([
+            {"id": 1, "modified_gmt": "2026-01-01T00:00:00"},
+            {"id": 2, "modified_gmt": "2026-01-02T00:00:00"},
+        ])
+
+        records = self._fetcher(media).fetch_source("atlas_media_documents")
+
+        self.assertEqual(media.read_calls, [[1, 2]])
+        self.assertEqual(
+            [record["content_text"] for record in records],
+            ["text for 1", "text for 2"],
+        )
+
+    def test_incremental_run_reuses_unchanged_extracted_text(self):
+        media = self.RecordingMediaClient([
+            {"id": 1, "modified_gmt": "2026-01-01T00:00:00"},
+            {"id": 2, "modified_gmt": "2026-02-09T00:00:00"},
+        ])
+        fetcher = self._fetcher(media)
+
+        records = fetcher.fetch_source(
+            "atlas_media_documents",
+            previous_records=[
+                {
+                    "id": 1,
+                    "modified_gmt": "2026-01-01T00:00:00",
+                    "content_text": "stored text",
+                },
+                {
+                    "id": 2,
+                    "modified_gmt": "2026-01-02T00:00:00",
+                    "content_text": "stale text",
+                },
+            ],
+            modified_after="2026-02-01T00:00:00+00:00",
+            incremental=True,
+        )
+
+        # Only the attachment whose modified_gmt moved is downloaded again.
+        self.assertEqual(media.read_calls, [[2]])
+        by_id = {record["id"]: record["content_text"] for record in records}
+        self.assertEqual(by_id[1], "stored text")
+        self.assertEqual(by_id[2], "text for 2")
+        summary = fetcher.source_summaries["atlas_media_documents"]
+        self.assertEqual(summary["reused"], 1)
+        self.assertEqual(summary["changed"], 1)
+
+    def test_unreadable_attachments_are_reported_as_failures(self):
+        media = self.RecordingMediaClient(
+            [{"id": 1, "modified_gmt": "2026-01-01T00:00:00"}],
+            failures=[{"attachment_id": 7, "error": "PdfTextUnavailable: no text"}],
+        )
+        fetcher = self._fetcher(media)
+
+        records = fetcher.fetch_source("atlas_media_documents")
+
+        # A file that cannot be read is surfaced in the manifest, and does
+        # not discard the attachments that were read successfully.
+        self.assertEqual([record["id"] for record in records], [1])
+        summary = fetcher.source_summaries["atlas_media_documents"]
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["failure_details"][0]["attachment_id"], 7)
+
+    def test_missing_media_client_is_a_clear_configuration_error(self):
+        fetcher = IngestionFetcher(WordPressClient(), MecClient())
+
+        with self.assertRaises(RuntimeError):
+            fetcher.fetch_source("atlas_media_documents")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Union
 
 from app.storage.naming import source_file_stem
+from app.storage.serialization import json_line
 
 
 class LocalStorage:
@@ -137,7 +138,7 @@ class LocalStorage:
 
         with temporary_path.open("w", encoding="utf-8") as file:
             for row in rows:
-                file.write(json.dumps(row, ensure_ascii=False))
+                file.write(json_line(row))
                 file.write("\n")
             file.flush()
             os.fsync(file.fileno())

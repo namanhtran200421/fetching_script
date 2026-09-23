@@ -28,6 +28,18 @@ def _boolean_setting(environment_name, default):
     )
 
 
+def _slug_list(environment_name, default=()):
+    """Read a comma-separated slug list. A set but empty value disables it."""
+    raw_value = os.getenv(environment_name)
+    if raw_value is None:
+        return tuple(default)
+    return tuple(dict.fromkeys(
+        item.strip().strip("/").lower()
+        for item in raw_value.split(",")
+        if item.strip().strip("/")
+    ))
+
+
 def _integer_allowlist(environment_name):
     raw_value = os.getenv(environment_name, "").strip()
     if not raw_value:
@@ -44,6 +56,41 @@ def _integer_allowlist(environment_name):
 
 
 WORDPRESS_PAGE_ALLOWLIST = _integer_allowlist("WORDPRESS_PAGE_ALLOWLIST")
+
+# The public Atlas website is a second, unauthenticated origin. Its settings are
+# deliberately separate from the WordPress membership ones so that no membership
+# credential or token can ever be selected for it.
+ATLAS_PUBLIC_BASE_URL = os.getenv(
+    "ATLAS_PUBLIC_BASE_URL", "https://atlas.culturalinfusion.com"
+)
+# Pages that carry no knowledge-base value: placeholders, sign-in and error
+# pages, empty quiz shells, and the FAQ page already ingested by the faq source.
+DEFAULT_ATLAS_PAGE_DENYLIST = (
+    "faq",
+    "test",
+    "test-2",
+    "page-not-found",
+    "sign-in",
+    "security-quiz",
+    "security-quiz-2",
+    # Contentless for retrieval: an external iframe embed and a form-only
+    # configuration page. Both clean to an empty document and would be
+    # quarantined on every run.
+    "deck",
+    "survey-config",
+)
+ATLAS_PAGE_DENYLIST = _slug_list(
+    "ATLAS_PAGE_DENYLIST", DEFAULT_ATLAS_PAGE_DENYLIST
+)
+ATLAS_MEDIA_MIME_TYPES = tuple(dict.fromkeys(
+    item.strip().lower()
+    for item in os.getenv("ATLAS_MEDIA_MIME_TYPES", "application/pdf").split(",")
+    if item.strip()
+))
+ATLAS_MEDIA_MAX_BYTES = int(
+    os.getenv("ATLAS_MEDIA_MAX_BYTES", str(25 * 1024 * 1024))
+)
+ATLAS_MEDIA_MAX_PDF_PAGES = int(os.getenv("ATLAS_MEDIA_MAX_PDF_PAGES", "500"))
 
 STORAGE_MODE = os.getenv("STORAGE_MODE", "local").lower()
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
@@ -146,6 +193,19 @@ def validate_config():
         parsed_url = urlparse(WORDPRESS_BASE_URL)
         if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
             errors.append("WORDPRESS_BASE_URL must be an absolute HTTP(S) URL")
+
+    parsed_atlas_url = urlparse(ATLAS_PUBLIC_BASE_URL)
+    if (
+        parsed_atlas_url.scheme not in {"http", "https"}
+        or not parsed_atlas_url.netloc
+    ):
+        errors.append("ATLAS_PUBLIC_BASE_URL must be an absolute HTTP(S) URL")
+    if not ATLAS_MEDIA_MIME_TYPES:
+        errors.append("ATLAS_MEDIA_MIME_TYPES must list at least one media type")
+    if ATLAS_MEDIA_MAX_BYTES < 1024:
+        errors.append("ATLAS_MEDIA_MAX_BYTES must be at least 1024")
+    if ATLAS_MEDIA_MAX_PDF_PAGES < 1:
+        errors.append("ATLAS_MEDIA_MAX_PDF_PAGES must be a positive integer")
 
     if HTTP_TIMEOUT_SECONDS <= 0:
         errors.append("HTTP_TIMEOUT_SECONDS must be greater than zero")
