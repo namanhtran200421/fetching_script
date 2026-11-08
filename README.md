@@ -29,6 +29,18 @@ Sitemap-only AI profiles, AI questions, portfolio items, taxonomy archives, and 
 new sitemap types added later are acquired from normal HTML pages. Search results
 and sitemap entries provide URLs only; titles and content come from those pages.
 
+## Engineering at a glance
+
+**Stack:** Python · asynchronous HTTP · WordPress REST / HTML / PDF ingestion · local storage or Amazon S3 · systemd scheduling.
+
+- **Incremental snapshots:** changed records are merged into complete, inspectable run outputs.
+- **Quality gates:** validation, quarantine records, manifests, and explicit partial-failure status.
+- **Credential isolation:** public-source clients are created without membership credentials.
+- **Bounded crawling:** robots policies, concurrency, retry, redirect, and response-size limits.
+- **Operations:** immutable raw runs, re-cleaning, atomic latest pointers, and scheduled EC2 execution.
+
+For a quick code review, start with [pipeline orchestration](app/jobs/run_pipeline.py), [HTTP handling](app/clients/http_client.py), [incremental ingestion](app/ingestion/incremental.py), and [tests](tests/). The [CI workflow](.github/workflows/ci.yml) runs offline checks. [Atlas Chatbot](https://github.com/namanhtran200421/atlas-chatbot) is the downstream retrieval application.
+
 ## Public Atlas website
 
 The same host publishes a substantial content site of its own, and it is ingested
@@ -377,3 +389,4 @@ bucket. The report contains timestamped application logs, stage durations, final
 statuses, source counts, source failures, quality-gate results, and quarantine
 counts. Operational reports stay in the raw bucket so they are not mistaken for
 cleaned RAG documents.
+
